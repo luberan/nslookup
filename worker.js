@@ -213,34 +213,37 @@ async function dohQuery(qname, type) {
 
 async function fetchMtaStsPolicy(domain) {
   // Defense-in-depth: domain is already validated, but re-check before use in URL
-  if (!isValidDomain(domain)) return { found: false, error: "invalid domain" };
+  if (!isValidDomain(domain)) return { found: false, reason: "invalid domain" };
 
   const MAX_BYTES = 64 * 1024; // RFC 8461: policy SHOULD be <= 64KB
   const TIMEOUT_MS = 5000;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const url = `https://mta-sts.${domain}/.well-known/mta-sts.txt`;
 
   try {
-    const res = await fetch(
-      `https://mta-sts.${domain}/.well-known/mta-sts.txt`,
-      {
-        headers: { Accept: "text/plain" },
-        // RFC 8461 §3.3: HTTP redirects MUST NOT be followed when fetching policy
-        redirect: "error",
-        signal: ctrl.signal,
-        cf: { cacheTtl: 300, cacheEverything: true },
-      }
-    );
-    if (!res.ok) return { found: false };
+    // Pozn.: RFC 8461 §3.3 zakazuje MTA following redirects, ale jako
+    // diagnostický nástroj chceme policy naj\u00edt — proto `follow` + příznak `redirected`.
+    const res = await fetch(url, {
+      headers: {
+        Accept: "text/plain",
+        "User-Agent": "Mozilla/5.0 (compatible; DNSLookupTool/1.0; +https://www.lukasberan.cz/)",
+      },
+      redirect: "follow",
+      signal: ctrl.signal,
+      cf: { cacheTtl: 300, cacheEverything: true },
+    });
+
+    if (!res.ok) {
+      return { found: false, reason: `HTTP ${res.status}`, url };
+    }
 
     const ct = (res.headers.get("content-type") || "").toLowerCase();
-    if (!ct.startsWith("text/plain")) {
-      return { found: false, error: "unexpected content-type" };
-    }
+    const ctOk = ct.startsWith("text/plain");
 
     const buf = await res.arrayBuffer();
     if (buf.byteLength > MAX_BYTES) {
-      return { found: false, error: "policy too large" };
+      return { found: false, reason: "policy too large (> 64KB)", url };
     }
     const raw = new TextDecoder("utf-8", { fatal: false }).decode(buf);
 
@@ -256,9 +259,24 @@ async function fetchMtaStsPolicy(domain) {
         }
       }
     }
-    return { found: true, policy, raw };
-  } catch {
-    return { found: false };
+
+    // Validace: musí obsahovat alespoň `version` a `mode`
+    if (!policy.version || !policy.mode) {
+      return { found: false, reason: "policy missing required fields", url, raw, contentType: ct };
+    }
+
+    return {
+      found: true,
+      policy,
+      raw,
+      url,
+      redirected: res.redirected,
+      finalUrl: res.url,
+      contentType: ct,
+      contentTypeOk: ctOk,
+    };
+  } catch (err) {
+    return { found: false, reason: err?.name === "AbortError" ? "timeout" : (err?.message || "fetch error"), url };
   } finally {
     clearTimeout(timer);
   }
@@ -476,7 +494,11 @@ const HTML = `<!doctype html>
         if (p.mode) items += '<li>mode: <code>' + esc(p.mode) + '</code></li>';
         if (p.max_age) items += '<li>max_age: <code>' + esc(p.max_age) + '</code></li>';
         if (p.mx) p.mx.forEach(m => { items += '<li>mx: <code>' + esc(m) + '</code></li>'; });
+        if (pol.redirected) items += '<li class="muted">⚠ Policy načtena přes HTTP redirect (RFC 8461 zakazuje pro MTA): <code>' + esc(pol.finalUrl || '') + '</code></li>';
+        if (pol.contentType && !pol.contentTypeOk) items += '<li class="muted">⚠ Content-Type: <code>' + esc(pol.contentType) + '</code> (očekáváno text/plain)</li>';
         mtaStsPol = items || '<li>—</li>';
+      } else if (pol && !pol.found && pol.reason) {
+        mtaStsPol = '<li class="muted">' + esc(pol.reason) + (pol.url ? ' — <code>' + esc(pol.url) + '</code>' : '') + '</li>';
       }
 
       // DANE/TLSA
