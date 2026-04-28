@@ -10,7 +10,7 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
-    // Favicon — přesměruj na externí obrázek (s cache), zabrání 404 spamům v logu
+    // Favicon — redirect to an external image (with cache); avoids 404 spam in the log
     if (url.pathname === "/favicon.ico") {
       return Response.redirect("https://www.lukasberan.cz/img/logo.png", 301);
     }
@@ -18,18 +18,18 @@ export default {
     if (url.pathname === "/api/dns") {
       const rawName = (url.searchParams.get("name") || "").trim().toLowerCase();
 
-      if (!rawName) return json({ error: "Chybí parametr ?name" }, 400);
+      if (!rawName) return json({ error: "Missing ?name parameter" }, 400);
 
-      // IDN → A-label (punycode). URL hostname parser udaje automaticky
-      // převede unicode jména (např. `lukasberan.cz`) na ASCII (`xn--...`).
+      // IDN → A-label (punycode). The URL hostname parser automatically
+      // converts unicode names (e.g. `háčkydomény.cz`) to ASCII (`xn--...`).
       let name;
       try {
         name = new URL(`http://${rawName}`).hostname;
       } catch {
-        return json({ error: "Neplatný název domény." }, 400);
+        return json({ error: "Invalid domain name." }, 400);
       }
       if (!isValidDomain(name)) {
-        return json({ error: "Neplatný název domény." }, 400);
+        return json({ error: "Invalid domain name." }, 400);
       }
 
       const baseTypes = ["NS", "A", "AAAA", "MX", "TXT"];
@@ -41,13 +41,13 @@ export default {
         })
       );
 
-      // SPF (z TXT)
+      // SPF (from TXT)
       const spf = (results.TXT?.answers || [])
         .map((rr) => normalizeTxt(rr.data))
         .filter((txt) => /(^|\s)v=spf1\b/i.test(txt));
 
-      // Email-security queries (paralelně)
-      // RFC 7505: "null MX" (preference 0, exchange ".") — doména explicitně nepřijímá mail.
+      // Email-security queries (in parallel)
+      // RFC 7505: "null MX" (preference 0, exchange ".") — domain explicitly does not accept mail.
       const mxHosts = (results.MX?.answers || [])
         .map((r) => r.exchange)
         .filter((h) => h && h !== "." && h !== "");
@@ -88,12 +88,12 @@ export default {
       const dane = mxHosts.map((mx, i) => ({
         mx,
         tlsa: tlsaResults[i]?.answers || [],
-        // DANE bez DNSSEC nemá smysl — propagujeme AD bit z DoH odpovědi
+        // DANE without DNSSEC is meaningless — propagate the AD bit from the DoH response
         dnssec: !!tlsaResults[i]?.ad,
         status: tlsaResults[i]?.status,
       }));
 
-      // Null MX detekce (RFC 7505)
+      // Null MX detection (RFC 7505)
       const nullMx = (results.MX?.answers || []).some(
         (r) => r.preference === 0 && (r.exchange === "." || r.exchange === "")
       );
@@ -113,7 +113,7 @@ export default {
         tlsRpt,
         bimi,
         dane,
-        // Souhrn DNSSEC stavu pro základní dotazy (AD bit z DoH)
+        // Summary of DNSSEC status for the basic queries (AD bit from DoH)
         dnssec: {
           ns: !!results.NS?.ad,
           a: !!results.A?.ad,
@@ -125,7 +125,7 @@ export default {
           tlsRpt: !!tlsRptQ.ad,
           bimi: !!bimiQ.ad,
         },
-        // Stavy DoH (3 = NXDOMAIN, 2 = SERVFAIL, 0 = OK)
+        // DoH status codes (3 = NXDOMAIN, 2 = SERVFAIL, 0 = OK)
         status: {
           ns: results.NS?.status,
           a: results.A?.status,
@@ -187,8 +187,8 @@ function htmlHeaders() {
   };
 }
 
-// DNS-over-HTTPS JSON dotaz na cloudflare-dns.com
-// `do=1` — žádáme, aby resolver vrátil AD (Authenticated Data) bit pro DNSSEC.
+// DNS-over-HTTPS JSON query against cloudflare-dns.com
+// `do=1` — request that the resolver returns the AD (Authenticated Data) bit for DNSSEC.
 async function dohQuery(qname, type) {
   const endpoint =
     `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(qname)}` +
@@ -200,7 +200,7 @@ async function dohQuery(qname, type) {
   if (!res.ok) return { error: `DoH ${type} ${res.status}` };
   const data = await res.json();
   const answers = (data.Answer || [])
-    // Filtrujeme RRSIG (typ 46) — nezobrazujeme syrové podpisy v UI
+    // Filter out RRSIG (type 46) — we don't display raw signatures in the UI
     .filter((a) => a.type !== 46)
     .map((a) => simplifyAnswer(type, a));
   return {
@@ -222,8 +222,8 @@ async function fetchMtaStsPolicy(domain) {
   const url = `https://mta-sts.${domain}/.well-known/mta-sts.txt`;
 
   try {
-    // Pozn.: RFC 8461 §3.3 zakazuje MTA following redirects, ale jako
-    // diagnostický nástroj chceme policy naj\u00edt — proto `follow` + příznak `redirected`.
+    // Note: RFC 8461 §3.3 forbids MTAs from following redirects, but as a
+    // diagnostic tool we want to find the policy — hence `follow` + a `redirected` flag.
     const res = await fetch(url, {
       headers: {
         Accept: "text/plain",
@@ -260,7 +260,7 @@ async function fetchMtaStsPolicy(domain) {
       }
     }
 
-    // Validace: musí obsahovat alespoň `version` a `mode`
+    // Validation: must contain at least `version` and `mode`
     if (!policy.version || !policy.mode) {
       return { found: false, reason: "policy missing required fields", url, raw, contentType: ct };
     }
@@ -290,7 +290,7 @@ function simplifyAnswer(type, a) {
   if (type === "TLSA") {
     const p = (a.data || "").trim().split(/\s+/);
     if (p.length < 4) {
-      // Poškozená / nekompletní TLSA data — vrať raw payload pro debug
+      // Malformed / incomplete TLSA data — return raw payload for debugging
       return { error: "malformed TLSA", raw: a.data, ttl: a.TTL };
     }
     return {
@@ -309,11 +309,11 @@ function trimDot(s) {
   return typeof s === "string" && s.endsWith(".") ? s.slice(0, -1) : s;
 }
 
-// Normalizuje DoH TXT data:
-// DoH JSON vrací více-stringový TXT jako sekvenci uvozovaných řetězců
-// oddělených mezerou, např. `"v=spf1 ..." "include:_spf.example.com ~all"`.
-// Uvnitř mohou být escapované znaky (\" a \\). Pokud vstup neobsahuje
-// žádné uvozovky, vrátíme ho beze změny (některé resolvery vrací plain text).
+// Normalizes DoH TXT data:
+// DoH JSON returns a multi-string TXT as a sequence of quoted strings
+// separated by spaces, e.g. `"v=spf1 ..." "include:_spf.example.com ~all"`.
+// They may contain escaped characters (\" and \\). If the input contains
+// no quotes, return it unchanged (some resolvers return plain text).
 function normalizeTxt(txt) {
   if (!txt) return "";
   if (!txt.includes('"')) return txt;
@@ -338,10 +338,10 @@ function json(obj, status = 200) {
   });
 }
 
-// ---------- HTML šablona (inline UI) ----------
+// ---------- HTML template (inline UI) ----------
 
 const HTML = `<!doctype html>
-<html lang="cs">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -385,14 +385,14 @@ const HTML = `<!doctype html>
   <div class="wrap">
     <div class="card">
       <h1>DNS lookup</h1>
-      <p class="muted">NS, A, AAAA, MX, SPF, DKIM, DMARC, MTA-STS, TLS-RPT, BIMI a DANE/TLSA.</p>
+      <p class="muted">NS, A, AAAA, MX, SPF, DKIM, DMARC, MTA-STS, TLS-RPT, BIMI and DANE/TLSA.</p>
       <form id="f">
         <input id="name" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="lukasberan.cz" required />
-        <button type="submit">Vyhledat</button>
+        <button type="submit">Look up</button>
       </form>
 
       <div id="out" class="grid"></div>
-      <div class="footer">Powered by Cloudflare Workers | Pro DNS dotazy používá DNS-over-HTTPS na <code>cloudflare-dns.com</code> | Vytvořil <a href="https://www.lukasberan.cz/"><strong>Lukáš Beran</strong></a></div>
+      <div class="footer">Powered by Cloudflare Workers | Uses DNS-over-HTTPS at <code>cloudflare-dns.com</code> | Created by <a href="https://www.lukasberan.cz/"><strong>Lukáš Beran</strong></a></div>
     </div>
   </div>
 
@@ -403,13 +403,13 @@ const HTML = `<!doctype html>
 
     f.addEventListener('submit', async (e) => {
       e.preventDefault();
-      out.innerHTML = '<p class="muted">Dotazuji DNS…</p>';
+      out.innerHTML = '<p class="muted">Querying DNS…</p>';
       const name = nameEl.value.trim();
       try {
         const url = '/api/dns?name=' + encodeURIComponent(name);
         const res = await fetch(url);
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Neznámá chyba');
+        if (!res.ok) throw new Error(data.error || 'Unknown error');
         render(data);
       } catch (err) {
         out.innerHTML = '<p class="err">' + err.message + '</p>';
@@ -450,9 +450,9 @@ const HTML = `<!doctype html>
       const st = data.status || {};
       const ds = data.dnssec || {};
 
-      // NXDOMAIN — doména neexistuje (NS dotaz vrátil status 3)
+      // NXDOMAIN — domain does not exist (NS query returned status 3)
       if (st.ns === 3) {
-        out.innerHTML = '<div class="notice notice-err rowspan">Doména <code>' + esc(d) + '</code> neexistuje (NXDOMAIN).</div>';
+        out.innerHTML = '<div class="notice notice-err rowspan">Domain <code>' + esc(d) + '</code> does not exist (NXDOMAIN).</div>';
         return;
       }
 
@@ -474,7 +474,7 @@ const HTML = `<!doctype html>
         data.dkim.forEach(sel => {
           const name = sel.selector + '._domainkey.' + d;
           if (sel.records.length === 0) {
-            dkItems += '<li><code>' + esc(name) + '</code> — nenalezen</li>';
+            dkItems += '<li><code>' + esc(name) + '</code> — not found</li>';
           } else {
             sel.records.forEach(r => {
               dkItems += '<li><code>' + esc(name) + '</code> → <code>' + esc(r.data) + '</code>' + ttl(r) + '</li>';
@@ -494,8 +494,8 @@ const HTML = `<!doctype html>
         if (p.mode) items += '<li>mode: <code>' + esc(p.mode) + '</code></li>';
         if (p.max_age) items += '<li>max_age: <code>' + esc(p.max_age) + '</code></li>';
         if (p.mx) p.mx.forEach(m => { items += '<li>mx: <code>' + esc(m) + '</code></li>'; });
-        if (pol.redirected) items += '<li class="muted">⚠ Policy načtena přes HTTP redirect (RFC 8461 zakazuje pro MTA): <code>' + esc(pol.finalUrl || '') + '</code></li>';
-        if (pol.contentType && !pol.contentTypeOk) items += '<li class="muted">⚠ Content-Type: <code>' + esc(pol.contentType) + '</code> (očekáváno text/plain)</li>';
+        if (pol.redirected) items += '<li class="muted">⚠ Policy fetched via HTTP redirect (RFC 8461 forbids this for MTAs): <code>' + esc(pol.finalUrl || '') + '</code></li>';
+        if (pol.contentType && !pol.contentTypeOk) items += '<li class="muted">⚠ Content-Type: <code>' + esc(pol.contentType) + '</code> (expected text/plain)</li>';
         mtaStsPol = items || '<li>—</li>';
       } else if (pol && !pol.found && pol.reason) {
         mtaStsPol = '<li class="muted">' + esc(pol.reason) + (pol.url ? ' — <code>' + esc(pol.url) + '</code>' : '') + '</li>';
@@ -507,15 +507,15 @@ const HTML = `<!doctype html>
         let ditems = '';
         data.dane.forEach(entry => {
           const dnssecBadge = entry.tlsa.length
-            ? (entry.dnssec ? badge(true, 'DNSSEC OK', '') : badgeWarn('DNSSEC chybí — TLSA nedůvěryhodné'))
+            ? (entry.dnssec ? badge(true, 'DNSSEC OK', '') : badgeWarn('DNSSEC missing — TLSA untrusted'))
             : '';
           if (entry.tlsa.length === 0) {
-            ditems += '<li><strong>' + esc(entry.mx) + '</strong> — žádný TLSA záznam</li>';
+            ditems += '<li><strong>' + esc(entry.mx) + '</strong> — no TLSA record</li>';
           } else {
             entry.tlsa.forEach(t => {
               if (t.error) {
                 ditems += '<li><strong>' + esc(entry.mx) + '</strong> ' + dnssecBadge
-                  + ' — neplatná TLSA data: <code>' + esc(t.raw || '') + '</code>' + ttl(t) + '</li>';
+                  + ' — invalid TLSA data: <code>' + esc(t.raw || '') + '</code>' + ttl(t) + '</li>';
                 return;
               }
               ditems += '<li><strong>' + esc(entry.mx) + '</strong> ' + dnssecBadge + ': '
@@ -531,7 +531,7 @@ const HTML = `<!doctype html>
       }
 
       const nullMxNotice = data.nullMx
-        ? '<div class="notice notice-warn rowspan">Doména deklaruje <strong>null MX</strong> (RFC 7505) — explicitně nepřijímá e-mail.</div>'
+        ? '<div class="notice notice-warn rowspan">Domain declares <strong>null MX</strong> (RFC 7505) — explicitly does not accept email.</div>'
         : '';
 
       out.innerHTML =
@@ -539,15 +539,15 @@ const HTML = `<!doctype html>
         panel('A', a) + panel('AAAA', aaaa) +
         panel('MX', mx) +
         nullMxNotice +
-        panel('SPF (TXT)' + badge(data.spf && data.spf.length, 'OK', 'Chybí') + (data.spf && data.spf.length > 1 ? badgeWarn('Více SPF záznamů — chyba konfigurace') : ''), spf) +
-        '<div class="section-title">Zabezpečení e-mailu</div>' +
-        panel('DKIM — Exchange Online' + badge(data.dkim && data.dkim.some(d2 => d2.records.length), 'OK', 'Chybí'), dkimHtml, true) +
-        panel('DMARC (_dmarc.' + esc(d) + ')' + badge(data.dmarc && data.dmarc.length, 'OK', 'Chybí') + (data.dmarc && data.dmarc.length > 1 ? badgeWarn('Více DMARC záznamů') : ''), dmarc, true) +
-        panel('MTA-STS TXT (_mta-sts.' + esc(d) + ')' + badge(data.mtaSts && data.mtaSts.length, 'OK', 'Chybí') + (data.mtaSts && data.mtaSts.length > 1 ? badgeWarn('Více MTA-STS záznamů') : ''), mtaSts) +
-        panel('MTA-STS Policy' + badge(pol && pol.found, 'OK', 'Chybí'), mtaStsPol) +
-        panel('TLS-RPT (_smtp._tls.' + esc(d) + ')' + badge(data.tlsRpt && data.tlsRpt.length, 'OK', 'Chybí') + (data.tlsRpt && data.tlsRpt.length > 1 ? badgeWarn('Více TLS-RPT záznamů') : ''), tlsRpt) +
-        panel('BIMI (default._bimi.' + esc(d) + ')' + badge(data.bimi && data.bimi.length, 'OK', 'Chybí'), bimi) +
-        panel('DANE / TLSA' + badge(data.dane && data.dane.some(e => e.tlsa.length), 'OK', 'Chybí') + (data.dane && data.dane.some(e => e.tlsa.length && !e.dnssec) ? badgeWarn('Bez DNSSEC') : ''), daneHtml, true);
+        panel('SPF (TXT)' + badge(data.spf && data.spf.length, 'OK', 'Missing') + (data.spf && data.spf.length > 1 ? badgeWarn('Multiple SPF records — misconfiguration') : ''), spf) +
+        '<div class="section-title">Email security</div>' +
+        panel('DKIM — Exchange Online' + badge(data.dkim && data.dkim.some(d2 => d2.records.length), 'OK', 'Missing'), dkimHtml, true) +
+        panel('DMARC (_dmarc.' + esc(d) + ')' + badge(data.dmarc && data.dmarc.length, 'OK', 'Missing') + (data.dmarc && data.dmarc.length > 1 ? badgeWarn('Multiple DMARC records') : ''), dmarc, true) +
+        panel('MTA-STS TXT (_mta-sts.' + esc(d) + ')' + badge(data.mtaSts && data.mtaSts.length, 'OK', 'Missing') + (data.mtaSts && data.mtaSts.length > 1 ? badgeWarn('Multiple MTA-STS records') : ''), mtaSts) +
+        panel('MTA-STS Policy' + badge(pol && pol.found, 'OK', 'Missing'), mtaStsPol) +
+        panel('TLS-RPT (_smtp._tls.' + esc(d) + ')' + badge(data.tlsRpt && data.tlsRpt.length, 'OK', 'Missing') + (data.tlsRpt && data.tlsRpt.length > 1 ? badgeWarn('Multiple TLS-RPT records') : ''), tlsRpt) +
+        panel('BIMI (default._bimi.' + esc(d) + ')' + badge(data.bimi && data.bimi.length, 'OK', 'Missing'), bimi) +
+        panel('DANE / TLSA' + badge(data.dane && data.dane.some(e => e.tlsa.length), 'OK', 'Missing') + (data.dane && data.dane.some(e => e.tlsa.length && !e.dnssec) ? badgeWarn('No DNSSEC') : ''), daneHtml, true);
     }
   </script>
 </body>
