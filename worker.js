@@ -1,5 +1,6 @@
-// worker.js — v8 (NS + A/AAAA + MX/SPF + DKIM + DMARC + MTA-STS + TLS-RPT + BIMI + DANE/TLSA)
-// Cloudflare Worker (Modules syntax). DNS-over-HTTPS: cloudflare-dns.com
+// DNS Lookup Tool — Cloudflare Worker (Modules syntax).
+// DNS-over-HTTPS resolver: cloudflare-dns.com
+// See README.md for the full list of records and the API contract.
 
 export default {
   async fetch(request, env, ctx) {

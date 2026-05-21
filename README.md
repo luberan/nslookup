@@ -96,6 +96,13 @@ The worker sends a complete set of security headers:
 - `X-Frame-Options: DENY`
 - `Referrer-Policy: no-referrer`
 
+> **About `'unsafe-inline'`:** the UI is intentionally shipped as a single
+> Worker file, so the small amount of JS/CSS is inlined into the HTML
+> response. If you want a strict CSP without `'unsafe-inline'`, move the
+> `<script>` / `<style>` blocks from `worker.js` into separate static
+> assets served from the same origin (e.g. via Workers Sites / Assets) and
+> tighten `script-src` / `style-src` to `'self'`.
+
 **MTA-STS policy fetch** is hardened against SSRF / abuse:
 - Domain re-validated before being used in the URL
 - 5s timeout (`AbortController`)
@@ -128,6 +135,22 @@ Or, without `npm install`:
 ```bash
 npx wrangler deploy worker.js
 ```
+
+## Forking / running your own instance
+
+A few personal touches are baked into `worker.js`. If you are deploying your
+own instance you will probably want to change them:
+
+- **Favicon redirect** (`/favicon.ico` → `https://www.lukasberan.cz/img/logo.png`)
+  and the `<link rel="icon">` in the HTML template. Replace with your own URL
+  or remove the redirect entirely.
+- **Footer link** in the HTML template ("Created by Lukas Beran").
+- **`img-src` in the Content-Security-Policy** — currently allows
+  `https://www.lukasberan.cz`. Update it to match whatever host serves your
+  favicon / images, or drop it if you remove the external image.
+- **`<meta name="robots" content="noindex, nofollow">`** in the HTML
+  template prevents search engines from indexing the UI. Remove it if you
+  want your public instance to be indexable.
 
 ## Technologies
 
