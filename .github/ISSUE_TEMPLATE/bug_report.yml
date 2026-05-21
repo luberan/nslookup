@@ -1,0 +1,65 @@
+name: Bug report
+description: Report a defect in the DNS Lookup Tool worker or UI
+title: "bug: <short description>"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! Please fill in the
+        sections below so the issue can be reproduced quickly.
+
+        **Do not report security vulnerabilities here** — see
+        [SECURITY.md](../blob/main/SECURITY.md).
+
+  - type: input
+    id: deployment
+    attributes:
+      label: Deployment URL or commit
+      description: The URL of your worker (or commit hash if running locally with `wrangler dev`).
+      placeholder: https://nslookup.example.workers.dev or commit 1a2b3c4
+    validations:
+      required: true
+
+  - type: input
+    id: domain
+    attributes:
+      label: Domain queried
+      description: The domain you queried that triggered the bug. Use `example.com` if the issue does not depend on a specific domain.
+      placeholder: example.com
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the relevant part of the JSON response or a screenshot of the UI.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Go to /
+        2. Enter `example.com`
+        3. Click "Look up"
+        4. See error in the BIMI panel
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        - Browser: Firefox 125
+        - OS: Windows 11
+        - Wrangler version (if local): 3.90.0

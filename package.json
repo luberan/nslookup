@@ -1,0 +1,45 @@
+{
+  "name": "nslookup",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Cloudflare Worker for comprehensive DNS analysis of a domain, with a focus on email security and DNSSEC validation.",
+  "license": "MIT",
+  "author": "Lukas Beran",
+  "homepage": "https://github.com/luberan/nslookup#readme",
+  "bugs": {
+    "url": "https://github.com/luberan/nslookup/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/luberan/nslookup.git"
+  },
+  "main": "worker.js",
+  "scripts": {
+    "dev": "wrangler dev worker.js",
+    "start": "wrangler dev worker.js",
+    "deploy": "wrangler deploy worker.js",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "cloudflare-workers",
+    "dns",
+    "dns-over-https",
+    "doh",
+    "dnssec",
+    "spf",
+    "dkim",
+    "dmarc",
+    "mta-sts",
+    "tls-rpt",
+    "bimi",
+    "dane",
+    "tlsa",
+    "email-security"
+  ]
+}

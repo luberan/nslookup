@@ -22,12 +22,14 @@ See [README.md](README.md) for the feature list and API reference.
 
 ## Local development
 
-Clone the repository and start the worker locally:
+Clone the repository, install dev dependencies, and start the worker locally:
 
 ```bash
 git clone https://github.com/luberan/nslookup.git
 cd nslookup
-npx wrangler dev worker.js
+cp wrangler.toml.example wrangler.toml   # adjust account_id / routes
+npm install
+npm run dev
 ```
 
 Wrangler prints a local URL (typically <http://127.0.0.1:8787>). Open it in a
@@ -37,10 +39,13 @@ browser for the UI, or query the JSON API:
 curl "http://127.0.0.1:8787/api/dns?name=example.com"
 ```
 
+> `wrangler.toml` is gitignored — never commit your personal `account_id`
+> or routes.
+
 ## Deployment
 
 ```bash
-npx wrangler deploy worker.js
+npm run deploy
 ```
 
 You need to be authenticated against your Cloudflare account (`npx wrangler

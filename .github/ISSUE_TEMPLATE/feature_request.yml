@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest a new DNS check, UI improvement, or other enhancement
+title: "feat: <short description>"
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem does this feature solve? Who benefits?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe how you imagine the feature would work (API, UI, configuration).
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Relevant RFCs, blog posts, or examples from similar tools.

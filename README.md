@@ -115,6 +115,16 @@ The worker sends a complete set of security headers:
 
 ## Deployment
 
+Copy `wrangler.toml.example` to `wrangler.toml` and fill in your
+`account_id` / `routes`, then:
+
+```bash
+npm install
+npm run deploy
+```
+
+Or, without `npm install`:
+
 ```bash
 npx wrangler deploy worker.js
 ```

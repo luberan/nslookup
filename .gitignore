@@ -1,0 +1,30 @@
+# Wrangler
+.wrangler/
+.dev.vars
+.dev.vars.*
+
+# Local env overrides
+wrangler.toml
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
