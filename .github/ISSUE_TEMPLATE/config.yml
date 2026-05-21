@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/luberan/nslookup/security/advisories/new
+    about: Please report security issues privately via GitHub Security Advisories. See SECURITY.md.
+  - name: Question / discussion
+    url: https://github.com/luberan/nslookup/discussions
+    about: For usage questions or design discussions, please open a discussion instead of an issue.
