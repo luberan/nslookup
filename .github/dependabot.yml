@@ -10,12 +10,19 @@ updates:
     labels:
       - "dependencies"
 
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    commit-message:
-      prefix: "chore(ci)"
-    labels:
-      - "dependencies"
-      - "ci"
+  # NOTE: no "github-actions" ecosystem here on purpose. This repo has no
+  # `.github/workflows/*.yml` files (CodeQL runs via GitHub's "default setup",
+  # which is not a committed workflow), so a github-actions update job would
+  # have nothing to scan and fails every week. Re-add the block below once an
+  # actual workflow that uses `uses:` actions is committed:
+  #
+  # - package-ecosystem: "github-actions"
+  #   directory: "/"
+  #   schedule:
+  #     interval: "weekly"
+  #   commit-message:
+  #     prefix: "chore(ci)"
+  #   labels:
+  #     - "dependencies"
+  #     - "ci"
+
