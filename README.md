@@ -79,6 +79,7 @@ DoH `Status` codes: `0` = OK, `2` = SERVFAIL, `3` = NXDOMAIN.
 
 ### CORS
 The endpoint returns `Access-Control-Allow-Origin: *` and supports preflight `OPTIONS`.
+Only `GET` is accepted; other methods return `405 Method Not Allowed` with an `Allow: GET, OPTIONS` header.
 
 ## UI
 
