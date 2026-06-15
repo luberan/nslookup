@@ -17,6 +17,11 @@ export default {
     }
 
     if (url.pathname === "/api/dns") {
+      // Only GET is meaningful for this read-only endpoint (OPTIONS handled above).
+      if (request.method !== "GET") {
+        return json({ error: "Method not allowed. Use GET." }, 405, { allow: "GET, OPTIONS" });
+      }
+
       const rawName = (url.searchParams.get("name") || "").trim().toLowerCase();
 
       if (!rawName) return json({ error: "Missing ?name parameter" }, 400);
@@ -277,7 +282,10 @@ async function fetchMtaStsPolicy(domain) {
       return { found: false, reason: "policy too large (> 64KB)", url };
     }
 
-    const policy = {};
+    // Null-prototype object so policy keys (parsed from an untrusted remote
+    // file) can never touch Object.prototype — e.g. a `__proto__:` line becomes
+    // a plain own property instead of being interpreted specially.
+    const policy = Object.create(null);
     for (const line of raw.split(/\r?\n/)) {
       const m = /^(\w+)\s*:\s*(.+)$/.exec(line.trim());
       if (m) {
@@ -385,7 +393,7 @@ function normalizeTxt(txt) {
   return out;
 }
 
-function json(obj, status = 200) {
+function json(obj, status = 200, extraHeaders) {
   return new Response(JSON.stringify(obj, null, 2), {
     status,
     headers: {
@@ -393,6 +401,7 @@ function json(obj, status = 200) {
       "cache-control": status === 200 ? "public, max-age=60" : "no-store",
       ...corsHeaders(),
       ...securityHeaders(),
+      ...extraHeaders,
     },
   });
 }
