@@ -113,8 +113,8 @@ behalf of user input. When changing it, please keep the following in mind:
 - **Validate input** before using it in URLs or DNS queries (length, label
   rules, punycode conversion via the `URL` parser).
 - **Preserve SSRF protections** around the MTA-STS policy fetch:
-  re-validation, timeout, response size limit, `redirect: "error"`,
-  `Content-Type` check.
+  re-validation, timeout, streamed response size limit, `redirect: "manual"`
+  (report but never follow redirects), `Content-Type` check.
 - **Do not weaken security headers** (`Content-Security-Policy`, `HSTS`,
   `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`).
 - **Propagate the DNSSEC AD bit** for any new DoH-based lookup, and surface

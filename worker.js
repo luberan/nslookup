@@ -49,9 +49,14 @@ export default {
 
       // Email-security queries (in parallel)
       // RFC 7505: "null MX" (preference 0, exchange ".") — domain explicitly does not accept mail.
-      const mxHosts = (results.MX?.answers || [])
-        .map((r) => r.exchange)
-        .filter((h) => h && h !== "." && h !== "");
+      // De-duplicate and cap the MX list: bounds the number of parallel TLSA
+      // subrequests (Workers subrequest limit) and avoids the worker being
+      // abused as a traffic-reflection amplifier toward many MX hosts.
+      const mxHosts = [...new Set(
+        (results.MX?.answers || [])
+          .map((r) => r.exchange)
+          .filter((h) => h && h !== "." && h !== "")
+      )].slice(0, 20);
 
       const [dmarcQ, mtaStsQ, tlsRptQ, bimiQ, dkim1Q, dkim2Q, mtaStsPolicy, ...tlsaResults] =
         await Promise.all([
@@ -194,22 +199,28 @@ async function dohQuery(qname, type) {
   const endpoint =
     `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(qname)}` +
     `&type=${encodeURIComponent(type)}&do=1`;
-  const res = await fetch(endpoint, {
-    headers: { Accept: "application/dns-json" },
-    cf: { cacheTtl: 60, cacheEverything: true },
-  });
-  if (!res.ok) return { error: `DoH ${type} ${res.status}` };
-  const data = await res.json();
-  const answers = (data.Answer || [])
-    // Filter out RRSIG (type 46) — we don't display raw signatures in the UI
-    .filter((a) => a.type !== 46)
-    .map((a) => simplifyAnswer(type, a));
-  return {
-    status: data.Status,
-    ad: !!data.AD,
-    nxdomain: data.Status === 3,
-    answers,
-  };
+  try {
+    const res = await fetch(endpoint, {
+      headers: { Accept: "application/dns-json" },
+      cf: { cacheTtl: 60, cacheEverything: true },
+    });
+    if (!res.ok) return { error: `DoH ${type} ${res.status}`, answers: [] };
+    const data = await res.json();
+    const answers = (data.Answer || [])
+      // Filter out RRSIG (type 46) — we don't display raw signatures in the UI
+      .filter((a) => a.type !== 46)
+      .map((a) => simplifyAnswer(type, a));
+    return {
+      status: data.Status,
+      ad: !!data.AD,
+      nxdomain: data.Status === 3,
+      answers,
+    };
+  } catch (err) {
+    // Network / JSON errors must not reject the surrounding Promise.all and
+    // turn the whole request into an uncaught 500.
+    return { error: err?.message || `DoH ${type} fetch error`, answers: [] };
+  }
 }
 
 async function fetchMtaStsPolicy(domain) {
@@ -223,17 +234,29 @@ async function fetchMtaStsPolicy(domain) {
   const url = `https://mta-sts.${domain}/.well-known/mta-sts.txt`;
 
   try {
-    // Note: RFC 8461 §3.3 forbids MTAs from following redirects, but as a
-    // diagnostic tool we want to find the policy — hence `follow` + a `redirected` flag.
+    // RFC 8461 §3.3 forbids following redirects when retrieving an MTA-STS
+    // policy. We use `manual` so an attacker-controlled `mta-sts.<domain>`
+    // cannot redirect us to an arbitrary target (SSRF / open-proxy hardening);
+    // a redirect is reported instead of followed.
     const res = await fetch(url, {
       headers: {
         Accept: "text/plain",
         "User-Agent": "Mozilla/5.0 (compatible; DNSLookupTool/1.0; +https://www.lukasberan.cz/)",
       },
-      redirect: "follow",
+      redirect: "manual",
       signal: ctrl.signal,
       cf: { cacheTtl: 300, cacheEverything: true },
     });
+
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location") || "";
+      return {
+        found: false,
+        reason: "policy uses an HTTP redirect (RFC 8461 forbids following it)",
+        url,
+        redirect: location,
+      };
+    }
 
     if (!res.ok) {
       return { found: false, reason: `HTTP ${res.status}`, url };
@@ -242,11 +265,17 @@ async function fetchMtaStsPolicy(domain) {
     const ct = (res.headers.get("content-type") || "").toLowerCase();
     const ctOk = ct.startsWith("text/plain");
 
-    const buf = await res.arrayBuffer();
-    if (buf.byteLength > MAX_BYTES) {
+    // Enforce the size cap up front (Content-Length) and again while streaming,
+    // so a hostile server can never make us buffer an unbounded body in memory
+    // (the previous code read the entire body before checking its size).
+    const lenHeader = res.headers.get("content-length");
+    if (lenHeader && Number(lenHeader) > MAX_BYTES) {
       return { found: false, reason: "policy too large (> 64KB)", url };
     }
-    const raw = new TextDecoder("utf-8", { fatal: false }).decode(buf);
+    const raw = await readCapped(res, MAX_BYTES);
+    if (raw === null) {
+      return { found: false, reason: "policy too large (> 64KB)", url };
+    }
 
     const policy = {};
     for (const line of raw.split(/\r?\n/)) {
@@ -271,8 +300,6 @@ async function fetchMtaStsPolicy(domain) {
       policy,
       raw,
       url,
-      redirected: res.redirected,
-      finalUrl: res.url,
       contentType: ct,
       contentTypeOk: ctOk,
     };
@@ -281,6 +308,37 @@ async function fetchMtaStsPolicy(domain) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Reads a response body as UTF-8 text, aborting once `maxBytes` is exceeded so
+// an oversized or hostile response can never be fully buffered into memory.
+// Returns null when the cap is exceeded.
+async function readCapped(res, maxBytes) {
+  const reader = res.body?.getReader();
+  if (!reader) return "";
+  const chunks = [];
+  let received = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > maxBytes) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+  const buf = new Uint8Array(received);
+  let off = 0;
+  for (const c of chunks) {
+    buf.set(c, off);
+    off += c.byteLength;
+  }
+  return new TextDecoder("utf-8", { fatal: false }).decode(buf);
 }
 
 function simplifyAnswer(type, a) {
@@ -495,7 +553,6 @@ const HTML = `<!doctype html>
         if (p.mode) items += '<li>mode: <code>' + esc(p.mode) + '</code></li>';
         if (p.max_age) items += '<li>max_age: <code>' + esc(p.max_age) + '</code></li>';
         if (p.mx) p.mx.forEach(m => { items += '<li>mx: <code>' + esc(m) + '</code></li>'; });
-        if (pol.redirected) items += '<li class="muted">⚠ Policy fetched via HTTP redirect (RFC 8461 forbids this for MTAs): <code>' + esc(pol.finalUrl || '') + '</code></li>';
         if (pol.contentType && !pol.contentTypeOk) items += '<li class="muted">⚠ Content-Type: <code>' + esc(pol.contentType) + '</code> (expected text/plain)</li>';
         mtaStsPol = items || '<li>—</li>';
       } else if (pol && !pol.found && pol.reason) {

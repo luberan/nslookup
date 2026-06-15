@@ -106,8 +106,8 @@ The worker sends a complete set of security headers:
 **MTA-STS policy fetch** is hardened against SSRF / abuse:
 - Domain re-validated before being used in the URL
 - 5s timeout (`AbortController`)
-- 64 KB limit (RFC 8461)
-- `redirect: "error"` (RFC 8461 §3.3 forbids following redirects)
+- 64 KB limit (RFC 8461), enforced while streaming so an oversized body is never fully buffered
+- `redirect: "manual"` — redirects are reported but never followed (RFC 8461 §3.3; prevents redirect-based SSRF to an arbitrary target)
 - `Content-Type: text/plain` check
 
 **Recommendation for production deployment:**
