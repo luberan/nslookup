@@ -1,0 +1,29 @@
+# Cloudflare Workers configuration.
+#
+# This file IS committed so that Cloudflare Workers Builds (the Git
+# integration) and `wrangler deploy` know how to build and deploy the Worker.
+# It contains no secrets: `account_id` is inferred from the connected account
+# in Workers Builds (or from `wrangler login` locally), and personal routes can
+# be added below or managed in the Cloudflare dashboard.
+#
+# Docs: https://developers.cloudflare.com/workers/wrangler/configuration/
+
+name = "nslookup"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Serve the Worker on its workers.dev subdomain (handy for testing). Set to
+# false if you only want it reachable via your own route(s).
+workers_dev = true
+
+# Optional — bind to your own custom route(s). Uncomment and edit, or manage
+# routes from the Cloudflare dashboard instead:
+# routes = [
+#   { pattern = "nslookup.example.com/*", zone_name = "example.com" }
+# ]
+
+# Optional — pin to a specific Cloudflare account. Usually not needed: Workers
+# Builds infers it from the connected account and `wrangler` uses your
+# logged-in account. Set it (or the CLOUDFLARE_ACCOUNT_ID env var) only if your
+# token can access multiple accounts:
+# account_id = "0000000000000000000000000000000"

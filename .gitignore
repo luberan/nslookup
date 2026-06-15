@@ -3,9 +3,6 @@
 .dev.vars
 .dev.vars.*
 
-# Local env overrides
-wrangler.toml
-
 # Node
 node_modules/
 npm-debug.log*
