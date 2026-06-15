@@ -15,7 +15,7 @@ Cloudflare Worker for comprehensive DNS analysis of a domain, with a focus on em
 ### Email security
 | Record | DNS query | Description |
 |---|---|---|
-| **DKIM** | `selector1._domainkey.<domain>`, `selector2._domainkey.<domain>` | DKIM CNAME records for Exchange Online |
+| **DKIM** | `<selector>._domainkey.<domain>` (CNAME + TXT) | Defaults to the Microsoft 365 selectors `selector1` / `selector2`. Override with `?selectors=` (comma-separated, max 5). Each selector is queried as **CNAME** (Microsoft 365 delegation) and **TXT** (direct keys, e.g. Google Workspace, Mailgun). |
 | **DMARC** | `_dmarc.<domain>` | Domain-based Message Authentication |
 | **MTA-STS TXT** | `_mta-sts.<domain>` | MTA Strict Transport Security identifier |
 | **MTA-STS Policy** | `https://mta-sts.<domain>/.well-known/mta-sts.txt` | Fetch and parse the MTA-STS policy (mode, max_age, mx) |
@@ -43,6 +43,9 @@ GET /api/dns?name=example.com
 
 Returns JSON with all results. DNS queries run in parallel via DNS-over-HTTPS (`cloudflare-dns.com`).
 
+**Optional query parameters:**
+- `selectors` — comma-separated DKIM selectors to look up **instead of** the default Microsoft 365 selectors (`selector1`, `selector2`). Each is validated as DNS label(s), deduplicated and capped at 5. Example: `?name=example.com&selectors=google,20221208`.
+
 ### Example response
 
 ```json
@@ -55,9 +58,10 @@ Returns JSON with all results. DNS queries run in parallel via DNS-over-HTTPS (`
   "nullMx": false,
   "spf": ["v=spf1 include:_spf.google.com ~all"],
   "dkim": [
-    { "selector": "selector1", "records": [{ "data": "selector1-example-com._domainkey.example.onmicrosoft.com", "ttl": 3600 }] },
-    { "selector": "selector2", "records": [] }
+    { "selector": "selector1", "cname": [{ "data": "selector1-example-com._domainkey.example.onmicrosoft.com", "ttl": 3600 }], "txt": [] },
+    { "selector": "selector2", "cname": [], "txt": [] }
   ],
+  "dkimCustom": false,
   "dmarc": ["v=DMARC1; p=reject; rua=mailto:dmarc@example.com"],
   "mtaSts": ["v=STSv1; id=20240101000000Z"],
   "mtaStsPolicy": { "found": true, "policy": { "version": "STSv1", "mode": "enforce", "max_age": "604800", "mx": ["*.example.com"] } },
@@ -76,6 +80,7 @@ DoH `Status` codes: `0` = OK, `2` = SERVFAIL, `3` = NXDOMAIN.
 - A label must not start or end with a hyphen
 - At least 2 labels (TLD + SLD)
 - Unicode → punycode via the `URL` parser
+- DKIM `selectors` (optional): each validated as DNS label(s), deduplicated, capped at 5 (invalid input → `400`)
 
 ### CORS
 The endpoint returns `Access-Control-Allow-Origin: *` and supports preflight `OPTIONS`.

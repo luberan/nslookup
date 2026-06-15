@@ -38,6 +38,15 @@ export default {
         return json({ error: "Invalid domain name." }, 400);
       }
 
+      // Optional custom DKIM selectors (comma-separated). Defaults to the
+      // Microsoft 365 selectors. Validated & capped to bound subrequests.
+      const rawSelectors = (url.searchParams.get("selectors") || "").trim();
+      const dkimSelectors = parseDkimSelectors(rawSelectors);
+      if (dkimSelectors === null) {
+        return json({ error: "Invalid DKIM selector(s)." }, 400);
+      }
+      const dkimCustom = rawSelectors !== "";
+
       const baseTypes = ["NS", "A", "AAAA", "MX", "TXT"];
       const results = {};
 
@@ -63,17 +72,27 @@ export default {
           .filter((h) => h && h !== "." && h !== "")
       )].slice(0, 20);
 
-      const [dmarcQ, mtaStsQ, tlsRptQ, bimiQ, dkim1Q, dkim2Q, mtaStsPolicy, ...tlsaResults] =
+      // DKIM: query each selector as both CNAME (Microsoft 365 delegation)
+      // and TXT (most other providers publish the key directly as TXT).
+      const dkimJobs = dkimSelectors.flatMap((sel) => [
+        dohQuery(`${sel}._domainkey.${name}`, "CNAME"),
+        dohQuery(`${sel}._domainkey.${name}`, "TXT"),
+      ]);
+      const tlsaJobs = mxHosts.map((mx) => dohQuery(`_25._tcp.${mx}`, "TLSA"));
+
+      const [dmarcQ, mtaStsQ, tlsRptQ, bimiQ, mtaStsPolicy, ...rest] =
         await Promise.all([
           dohQuery(`_dmarc.${name}`, "TXT"),
           dohQuery(`_mta-sts.${name}`, "TXT"),
           dohQuery(`_smtp._tls.${name}`, "TXT"),
           dohQuery(`default._bimi.${name}`, "TXT"),
-          dohQuery(`selector1._domainkey.${name}`, "CNAME"),
-          dohQuery(`selector2._domainkey.${name}`, "CNAME"),
           fetchMtaStsPolicy(name),
-          ...mxHosts.map((mx) => dohQuery(`_25._tcp.${mx}`, "TLSA")),
+          ...dkimJobs,
+          ...tlsaJobs,
         ]);
+      // Two variable-length tails share one Promise.all — split by job count.
+      const dkimRes = rest.slice(0, dkimJobs.length);
+      const tlsaResults = rest.slice(dkimJobs.length);
 
       const dmarc = (dmarcQ.answers || [])
         .map((rr) => normalizeTxt(rr.data))
@@ -91,10 +110,15 @@ export default {
         .map((rr) => normalizeTxt(rr.data))
         .filter((txt) => /^v=BIMI1\b/i.test(txt));
 
-      const dkim = [
-        { selector: "selector1", records: dkim1Q.answers || [] },
-        { selector: "selector2", records: dkim2Q.answers || [] },
-      ];
+      const dkim = dkimSelectors.map((selector, i) => {
+        const cname = dkimRes[i * 2]?.answers || [];
+        const txt = (dkimRes[i * 2 + 1]?.answers || [])
+          .map((rr) => ({ data: normalizeTxt(rr.data), ttl: rr.ttl }))
+          // Keep only TXT that looks like a DKIM key, not the CNAME-chain
+          // hostname a TXT query also returns for delegated (M365) selectors.
+          .filter((rr) => /(^|;|\s)(v=DKIM1|k=|p=)/i.test(rr.data));
+        return { selector, cname, txt };
+      });
 
       const dane = mxHosts.map((mx, i) => ({
         mx,
@@ -118,6 +142,7 @@ export default {
         nullMx,
         spf,
         dkim,
+        dkimCustom,
         dmarc,
         mtaSts,
         mtaStsPolicy,
@@ -166,6 +191,24 @@ function isValidDomain(name) {
   const labels = n.split(".");
   if (labels.length < 2) return false;
   return labels.every((l) => label.test(l));
+}
+
+// Parses the optional `selectors` query param (comma-separated DKIM selectors).
+// Returns the Microsoft 365 defaults when empty, null when any selector is
+// invalid, otherwise the validated list (deduplicated, capped at 5).
+function parseDkimSelectors(raw) {
+  const DEFAULTS = ["selector1", "selector2"];
+  if (!raw) return DEFAULTS;
+  const list = [
+    ...new Set(raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)),
+  ];
+  if (!list.length) return DEFAULTS;
+  const label = /^(?!-)[a-z0-9-]{1,63}(?<!-)$/i;
+  const valid = list.every(
+    (s) => s.length <= 253 && s.split(".").every((l) => label.test(l))
+  );
+  if (!valid) return null;
+  return list.slice(0, 5);
 }
 
 // ---------- Headers ----------
@@ -427,6 +470,10 @@ const HTML = `<!doctype html>
     form{ display:flex; gap:12px; flex-wrap:wrap; }
     input[type=text]{ flex:1 1 320px; padding:12px 14px; border-radius:12px; border:1px solid rgba(255,255,255,0.15); background:#0e1630; color:var(--text); outline:none; font-size:16px; }
     button{ padding:12px 16px; border-radius:12px; border:0; background:linear-gradient(135deg,#5d8bff,#6ae3ff); color:#0c1224; font-weight:700; cursor:pointer; }
+    details.adv{ flex:1 1 100%; margin-top:2px; }
+    details.adv summary{ cursor:pointer; color:#9fb1ff; font-size:14px; user-select:none; }
+    details.adv input{ margin-top:10px; width:100%; }
+    details.adv .muted{ display:block; margin-top:6px; }
     .muted{ color:#9fb1ff; font-size:14px; }
     .grid{ display:grid; grid-template-columns: 1fr; gap:16px; margin-top:18px; }
     @media(min-width:980px){ .grid{ grid-template-columns: repeat(2, 1fr);} }
@@ -457,6 +504,11 @@ const HTML = `<!doctype html>
       <form id="f">
         <input id="name" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="lukasberan.cz" required />
         <button type="submit">Look up</button>
+        <details class="adv">
+          <summary>Advanced — custom DKIM selectors</summary>
+          <input id="selectors" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="selector1, selector2 (default — Microsoft 365)" />
+          <span class="muted">Comma-separated. Overrides the default Microsoft 365 selectors (max 5).</span>
+        </details>
       </form>
 
       <div id="out" class="grid"></div>
@@ -467,14 +519,17 @@ const HTML = `<!doctype html>
   <script>
     const f = document.getElementById('f');
     const nameEl = document.getElementById('name');
+    const selectorsEl = document.getElementById('selectors');
     const out = document.getElementById('out');
 
     f.addEventListener('submit', async (e) => {
       e.preventDefault();
       out.innerHTML = '<p class="muted">Querying DNS…</p>';
       const name = nameEl.value.trim();
+      const selectors = (selectorsEl.value || '').trim();
       try {
-        const url = '/api/dns?name=' + encodeURIComponent(name);
+        let url = '/api/dns?name=' + encodeURIComponent(name);
+        if (selectors) url += '&selectors=' + encodeURIComponent(selectors);
         const res = await fetch(url);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Unknown error');
@@ -535,17 +590,23 @@ const HTML = `<!doctype html>
       const tlsRpt = li(data.tlsRpt, s => '<code>' + esc(s) + '</code>');
       const bimi   = li(data.bimi, s => '<code>' + esc(s) + '</code>');
 
-      // DKIM (Exchange Online selectors)
+      // DKIM — each selector may resolve as a CNAME (Microsoft 365 delegation)
+      // and/or a TXT key (most other providers).
       let dkimHtml = '<li>—</li>';
       if (data.dkim && data.dkim.length > 0) {
         let dkItems = '';
         data.dkim.forEach(sel => {
-          const name = sel.selector + '._domainkey.' + d;
-          if (sel.records.length === 0) {
-            dkItems += '<li><code>' + esc(name) + '</code> — not found</li>';
+          const qname = sel.selector + '._domainkey.' + d;
+          const cname = sel.cname || [];
+          const txt = sel.txt || [];
+          if (!cname.length && !txt.length) {
+            dkItems += '<li><code>' + esc(qname) + '</code> — not found</li>';
           } else {
-            sel.records.forEach(r => {
-              dkItems += '<li><code>' + esc(name) + '</code> → <code>' + esc(r.data) + '</code>' + ttl(r) + '</li>';
+            cname.forEach(r => {
+              dkItems += '<li><code>' + esc(qname) + '</code> <span class="muted">(CNAME)</span> → <code>' + esc(r.data) + '</code>' + ttl(r) + '</li>';
+            });
+            txt.forEach(r => {
+              dkItems += '<li><code>' + esc(qname) + '</code> <span class="muted">(TXT)</span> → <code>' + esc(r.data) + '</code>' + ttl(r) + '</li>';
             });
           }
         });
@@ -608,7 +669,7 @@ const HTML = `<!doctype html>
         nullMxNotice +
         panel('SPF (TXT)' + badge(data.spf && data.spf.length, 'OK', 'Missing') + (data.spf && data.spf.length > 1 ? badgeWarn('Multiple SPF records — misconfiguration') : ''), spf) +
         '<div class="section-title">Email security</div>' +
-        panel('DKIM — Exchange Online' + badge(data.dkim && data.dkim.some(d2 => d2.records.length), 'OK', 'Missing'), dkimHtml, true) +
+        panel('DKIM — ' + (data.dkimCustom ? 'custom selectors' : 'Microsoft 365') + badge(data.dkim && data.dkim.some(d2 => (d2.cname && d2.cname.length) || (d2.txt && d2.txt.length)), 'OK', 'Missing'), dkimHtml, true) +
         panel('DMARC (_dmarc.' + esc(d) + ')' + badge(data.dmarc && data.dmarc.length, 'OK', 'Missing') + (data.dmarc && data.dmarc.length > 1 ? badgeWarn('Multiple DMARC records') : ''), dmarc, true) +
         panel('MTA-STS TXT (_mta-sts.' + esc(d) + ')' + badge(data.mtaSts && data.mtaSts.length, 'OK', 'Missing') + (data.mtaSts && data.mtaSts.length > 1 ? badgeWarn('Multiple MTA-STS records') : ''), mtaSts) +
         panel('MTA-STS Policy' + badge(pol && pol.found, 'OK', 'Missing'), mtaStsPol) +
