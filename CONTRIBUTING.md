@@ -27,7 +27,6 @@ Clone the repository, install dev dependencies, and start the worker locally:
 ```bash
 git clone https://github.com/luberan/nslookup.git
 cd nslookup
-cp wrangler.toml.example wrangler.toml   # adjust account_id / routes
 npm install
 npm run dev
 ```
@@ -39,8 +38,9 @@ browser for the UI, or query the JSON API:
 curl "http://127.0.0.1:8787/api/dns?name=example.com"
 ```
 
-> `wrangler.toml` is gitignored — never commit your personal `account_id`
-> or routes.
+> `wrangler.toml` is committed but contains no secrets. Keep your personal
+> `account_id` and private routes out of it — use the Cloudflare dashboard or
+> the `CLOUDFLARE_ACCOUNT_ID` env var so they are never pushed.
 
 ## Deployment
 
@@ -49,7 +49,7 @@ npm run deploy
 ```
 
 You need to be authenticated against your Cloudflare account (`npx wrangler
-login`) and have a `wrangler.toml` configured for your environment.
+login`). The committed `wrangler.toml` already provides `name` / `main`.
 
 ## How to contribute
 

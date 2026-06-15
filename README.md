@@ -123,8 +123,8 @@ The worker sends a complete set of security headers:
 
 ## Deployment
 
-Copy `wrangler.toml.example` to `wrangler.toml` and fill in your
-`account_id` / `routes`, then:
+The repository ships a ready-to-use `wrangler.toml` (no secrets). After
+authenticating with `npx wrangler login`, deploy with:
 
 ```bash
 npm install
@@ -152,6 +152,9 @@ own instance you will probably want to change them:
 - **`<meta name="robots" content="noindex, nofollow">`** in the HTML
   template prevents search engines from indexing the UI. Remove it if you
   want your public instance to be indexable.
+- **`name` in `wrangler.toml`** — currently `nslookup`. If you deploy via
+  Cloudflare Workers Builds, make sure it matches the Worker you connected
+  (or rename both); add your own `routes` / `account_id` there if needed.
 
 ## Technologies
 
