@@ -106,7 +106,11 @@ Keep the subject line under 72 characters and write it in the imperative mood.
 - **Naming.** `camelCase` for variables and functions, `UPPER_SNAKE_CASE` only
   for true constants.
 - **HTML / CSS in the worker.** Keep template strings readable; prefer small
-  helper functions over giant interpolations.
+   helper functions over giant interpolations. Inline script and style blocks
+   are authorized by exact SHA-256 hashes in `htmlHeaders()`; update those
+   hashes whenever either block changes. The CSP regression test verifies them.
+- **Protocol versions.** Implement DMARC discovery according to RFC 9989 (DNS
+   Tree Walk), not the obsolete RFC 7489 Public Suffix List algorithm.
 
 ## Security considerations
 
@@ -122,6 +126,8 @@ behalf of user input. When changing it, please keep the following in mind:
   `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`).
 - **Propagate the DNSSEC AD bit** for any new DoH-based lookup, and surface
   failures in the UI.
+- **Preserve the subrequest budget.** Free Workers allow 50 subrequests per
+   invocation; user-controlled query fan-out currently has a worst case of 42.
 
 If you find a vulnerability, please follow [SECURITY.md](SECURITY.md) instead
 of opening a public issue or PR.

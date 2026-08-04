@@ -16,23 +16,23 @@ Cloudflare Worker for comprehensive DNS analysis of a domain, with a focus on em
 | Record | DNS query | Description |
 |---|---|---|
 | **DKIM** | `<selector>._domainkey.<domain>` (CNAME + TXT) | Defaults to the Microsoft 365 selectors `selector1` / `selector2`. Override with `?selectors=` (comma-separated, max 5). Each selector is queried as **CNAME** (Microsoft 365 delegation) and **TXT** (direct keys, e.g. Google Workspace, Mailgun). |
-| **DMARC** | `_dmarc.<domain>` | Domain-based Message Authentication |
+| **DMARC** | RFC 9989 DNS Tree Walk | Checks the Author Domain first, then walks toward the root (max 8 queries) to discover inherited Organizational Domain or Public Suffix Domain policy. Reports `p`, `sp`, `np`, `psd`, and `t` effects. |
 | **MTA-STS TXT** | `_mta-sts.<domain>` | MTA Strict Transport Security identifier |
 | **MTA-STS Policy** | `https://mta-sts.<domain>/.well-known/mta-sts.txt` | Fetch and parse the MTA-STS policy (mode, max_age, mx) |
 | **TLS-RPT** | `_smtp._tls.<domain>` | SMTP TLS Reporting |
 | **BIMI** | `default._bimi.<domain>` | Brand Indicators for Message Identification |
-| **DANE / TLSA** | `_25._tcp.<mx-host>` for each MX | DNS-based Authentication of Named Entities (with DNSSEC validation) |
+| **DANE / TLSA** | `_25._tcp.<mx-host>` for each MX | DNS-based Authentication of Named Entities (with DNSSEC validation). MX hosts are sorted by priority and capped at 15; coverage metadata makes truncation explicit. Domains with no MX but a valid A/AAAA record use the RFC 5321 implicit MX. |
 
 ### DNSSEC
-Every DoH query uses the `do=1` flag and propagates the **AD bit** (Authenticated Data) from the response. The UI shows:
-- ✅ DNSSEC validation OK for individual records
-- ⚠️ Warning for **DANE/TLSA without DNSSEC** (an unsigned TLSA record is untrustworthy)
+Every DoH query uses the `do=1` flag and propagates the **AD bit** (Authenticated Data) from the response. Each relevant UI panel distinguishes **DNSSEC authenticated** from **DNSSEC not authenticated**. The latter is informational for ordinary DNS records; an unauthenticated TLSA record is explicitly marked untrusted because DANE depends on DNSSEC.
 
 ### Configuration validation
 The UI warns about common configuration mistakes:
 - Multiple SPF / DMARC / MTA-STS / TLS-RPT records (RFC violation)
+- Inherited DMARC policy, its policy domain, test mode, and requested versus effective policy
 - Invalid MTA-STS discovery records and policy files
 - TLSA records without DNSSEC validation
+- A truncated DANE scan when more than 15 unique MX hosts are published
 - Null MX (informational)
 - NXDOMAIN — the entire domain does not exist
 
@@ -69,12 +69,14 @@ Returns JSON with all results. DNS queries run in parallel via DNS-over-HTTPS (`
   ],
   "dkimCustom": false,
   "dmarc": ["v=DMARC1; p=reject; rua=mailto:dmarc@example.com"],
+  "dmarcDiscovery": { "found": true, "valid": true, "policyDomain": "example.com", "source": "author", "inherited": false, "requestedPolicy": "reject", "effectivePolicy": "reject", "testing": false, "dnssec": true },
   "mtaSts": ["v=STSv1; id=20240101000000Z"],
   "mtaStsValidation": { "found": true, "valid": true, "record": "v=STSv1; id=20240101000000Z", "id": "20240101000000Z" },
   "mtaStsPolicy": { "found": true, "valid": true, "policy": { "version": "STSv1", "mode": "enforce", "max_age": "604800", "mx": ["*.example.com"] } },
   "tlsRpt": ["v=TLSRPTv1; rua=mailto:tlsrpt@example.com"],
   "bimi": ["v=BIMI1; l=https://example.com/logo.svg"],
-  "dane": [{ "mx": "mail.example.com", "tlsa": [], "dnssec": true, "status": 0 }],
+  "dane": [{ "mx": "mail.example.com", "preference": 10, "implicit": false, "tlsa": [], "dnssec": true, "status": 0 }],
+  "daneMeta": { "candidates": 1, "checked": 1, "truncated": false, "limit": 15, "implicitMx": false },
   "dnssec": { "ns": true, "a": true, "aaaa": true, "mx": true, "txt": true, "dmarc": true, "mtaStsTxt": true, "tlsRpt": true, "bimi": true },
   "status":  { "ns": 0, "a": 0, "aaaa": 0, "mx": 0, "txt": 0, "dmarc": 0, "mtaStsTxt": 0, "tlsRpt": 0, "bimi": 0 },
   "errors":  { "ns": null, "a": null, "aaaa": null, "mx": null, "txt": null, "dmarc": null, "mtaStsTxt": null, "tlsRpt": null, "bimi": null }
@@ -102,25 +104,26 @@ Only `GET` is accepted; other methods return `405 Method Not Allowed` with an `A
 ## UI
 
 The root path (`/`) returns an HTML page with a search form. Results are displayed in panels with colored indicators:
-- 🟢 **OK** — record found / DNSSEC validated
-- 🔴 **Missing** — record not found
-- 🟡 **Warning** — duplicate record, missing DNSSEC, null MX, etc.
+- **Found** — a matching record was discovered but not fully validated
+- **Valid / DNSSEC authenticated** — the configuration or DNS response was validated
+- **Missing / Invalid** — a record was not found or failed validation
+- **Warning / Lookup failed** — duplicate records, unauthenticated TLSA, resolver errors, null MX, etc.
+
+Starting a new lookup aborts the previous browser request and ignores any stale
+response that finishes later, so older results cannot replace the latest query.
 
 ## Security
 
 The worker sends a complete set of security headers:
-- `Content-Security-Policy` (script/style `'self' 'unsafe-inline'`, img `'self' data: lukasberan.cz`)
+- `Content-Security-Policy` with exact SHA-256 sources for the inline script and style (no `'unsafe-inline'`), `object-src 'none'`, and restricted image/connect/form/frame sources
 - `Strict-Transport-Security: max-age=31536000; includeSubDomains`
 - `X-Content-Type-Options: nosniff`
 - `X-Frame-Options: DENY`
 - `Referrer-Policy: no-referrer`
 
-> **About `'unsafe-inline'`:** the UI is intentionally shipped as a single
-> Worker file, so the small amount of JS/CSS is inlined into the HTML
-> response. If you want a strict CSP without `'unsafe-inline'`, move the
-> `<script>` / `<style>` blocks from `worker.js` into separate static
-> assets served from the same origin (e.g. via Workers Sites / Assets) and
-> tighten `script-src` / `style-src` to `'self'`.
+The UI remains a single Worker file. A regression test recalculates both CSP
+hashes from the returned HTML, so changing inline CSS or JavaScript without
+updating the corresponding policy fails CI instead of silently blocking the UI.
 
 **MTA-STS policy fetch** is hardened against SSRF / abuse:
 - Performed only after one syntactically valid `_mta-sts` discovery TXT record
@@ -132,8 +135,34 @@ The worker sends a complete set of security headers:
 - Strict `Content-Type: text/plain`, version, mode, `max_age` and MX-pattern validation
 - `cache: "no-store"` — RFC 8461 forbids HTTP caching by policy clients
 
-**Recommendation for production deployment:**
-- Configure rate limiting in the Cloudflare Dashboard (Security rules → Rate limiting rules) — e.g. `10 req / 10 s per IP` for `/api/dns`.
+### Production rate limiting
+
+The production deployment is protected by an active Cloudflare rate limiting
+rule configured in **Security rules → Rate limiting rules**:
+
+- Match expression: `(http.request.uri.path eq "/api/dns")`
+- Counting characteristic: source IP
+- Threshold: 10 requests per 10 seconds
+- Action: block for 10 seconds
+- Execution order: first
+
+This is dashboard-managed infrastructure and is therefore not represented in
+`wrangler.toml` or automatically inherited by forks and separate deployments.
+Operators of another deployment should recreate an equivalent rule in their
+own Cloudflare zone.
+
+Cloudflare rate limiting rules are zone-scoped. This repository currently has
+`workers_dev = true`, which also exposes a public `*.workers.dev` URL. When the
+production API is served on a custom domain, disable that alternate route with
+`workers_dev = false` or restrict it with Cloudflare Access so it cannot bypass
+the custom domain's zone-level rate limit.
+
+### Request resource bounds
+
+Workers Free allows 50 subrequests per invocation. User-controlled fan-out is
+bounded to 5 DKIM selectors (10 DNS queries), 15 TLSA hosts, and 8 DMARC Tree
+Walk queries. Together with fixed DNS and optional MTA-STS policy requests, the
+worst case is 42 subrequests, leaving headroom below the platform limit.
 
 ## Caching
 
