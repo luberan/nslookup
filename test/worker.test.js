@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import vm from "node:vm";
 
@@ -14,10 +15,11 @@ async function withFetch(fetchImpl, callback) {
   }
 }
 
-async function lookup(name = "example.com") {
-  const response = await worker.fetch(
-    new Request(`https://local.test/api/dns?name=${encodeURIComponent(name)}`)
-  );
+async function lookup(name = "example.com", selectors = null) {
+  const url = new URL("https://local.test/api/dns");
+  url.searchParams.set("name", name);
+  if (selectors) url.searchParams.set("selectors", selectors);
+  const response = await worker.fetch(new Request(url));
   return { response, body: await response.json() };
 }
 
@@ -37,7 +39,7 @@ function createFetch({ answers = {}, statuses = {}, policy = null } = {}) {
         headers: { "content-type": "application/dns-json" },
       });
     }
-    if (url.hostname === "mta-sts.example.com" && policy) {
+    if (url.hostname.startsWith("mta-sts.") && policy) {
       return new Response(policy.body, {
         status: policy.status ?? 200,
         headers: { "content-type": policy.contentType || "text/plain" },
@@ -47,6 +49,16 @@ function createFetch({ answers = {}, statuses = {}, policy = null } = {}) {
   };
   fetchImpl.calls = calls;
   return fetchImpl;
+}
+
+function extractInlineBlock(html, tag) {
+  const openingTag = `<${tag}>`;
+  const closingTag = `</${tag}>`;
+  const start = html.indexOf(openingTag);
+  const end = html.indexOf(closingTag, start + openingTag.length);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  return html.slice(start + openingTag.length, end);
 }
 
 test("domain input rejects URL syntax and keeps IDN conversion", async () => {
@@ -200,16 +212,196 @@ test("malformed TLSA fields are reported as invalid data", async () => {
   });
 });
 
+test("DANE sorts MX candidates before applying a transparent limit", async () => {
+  const mxAnswers = Array.from({ length: 21 }, (_, index) => ({
+    type: 15,
+    TTL: 300,
+    data: `${21 - index} mx${21 - index}.example.com.`,
+  }));
+  const fetchImpl = createFetch({
+    answers: { "example.com|MX": mxAnswers },
+  });
+  await withFetch(fetchImpl, async () => {
+    const { body } = await lookup();
+    assert.equal(body.mx[0].preference, 1);
+    assert.equal(body.dane[0].mx, "mx1.example.com");
+    assert.equal(body.dane.length, 15);
+    assert.deepEqual(body.daneMeta, {
+      candidates: 21,
+      checked: 15,
+      truncated: true,
+      limit: 15,
+      implicitMx: false,
+    });
+  });
+});
+
+test("DANE uses an implicit MX only when address records exist", async () => {
+  const implicitFetch = createFetch({
+    answers: {
+      "example.com|A": [{ type: 1, TTL: 300, data: "192.0.2.10" }],
+    },
+  });
+  await withFetch(implicitFetch, async () => {
+    const { body } = await lookup();
+    assert.equal(body.dane.length, 1);
+    assert.equal(body.dane[0].mx, "example.com");
+    assert.equal(body.dane[0].implicit, true);
+    assert.equal(body.daneMeta.implicitMx, true);
+    assert.ok(implicitFetch.calls.some((call) =>
+      call.url.includes("name=_25._tcp.example.com") && call.url.includes("type=TLSA")
+    ));
+  });
+
+  const nullMxFetch = createFetch({
+    answers: {
+      "example.com|A": [{ type: 1, TTL: 300, data: "192.0.2.10" }],
+      "example.com|MX": [{ type: 15, TTL: 300, data: "0 ." }],
+    },
+  });
+  await withFetch(nullMxFetch, async () => {
+    const { body } = await lookup();
+    assert.equal(body.nullMx, true);
+    assert.equal(body.dane.length, 0);
+    assert.equal(body.daneMeta.implicitMx, false);
+  });
+});
+
+test("DMARC inherits policy through the RFC 9989 DNS Tree Walk", async () => {
+  const fetchImpl = createFetch({
+    answers: {
+      "_dmarc.example.com|TXT": [{
+        type: 16,
+        TTL: 300,
+        data: "\"v=DMARC1; p=reject; sp=quarantine; psd=n;\"",
+      }],
+    },
+  });
+  await withFetch(fetchImpl, async () => {
+    const { body } = await lookup("mail.example.com");
+    assert.deepEqual(body.dmarc, ["v=DMARC1; p=reject; sp=quarantine; psd=n;"]);
+    assert.equal(body.dmarcDiscovery.policyDomain, "example.com");
+    assert.equal(body.dmarcDiscovery.organizationalDomain, "example.com");
+    assert.equal(body.dmarcDiscovery.source, "organizational");
+    assert.equal(body.dmarcDiscovery.inherited, true);
+    assert.equal(body.dmarcDiscovery.requestedPolicy, "quarantine");
+    assert.equal(body.dmarcDiscovery.effectivePolicy, "quarantine");
+    assert.equal(body.dmarcDiscovery.queries.length, 2);
+    assert.equal(fetchImpl.calls.some((call) => call.url.includes("name=_dmarc.com")), false);
+  });
+});
+
+test("DMARC handles PSD and test-mode policies", async () => {
+  const psdFetch = createFetch({
+    answers: {
+      "_dmarc.bank.example|TXT": [{
+        type: 16,
+        TTL: 300,
+        data: "\"v=DMARC1; p=reject; psd=y;\"",
+      }],
+    },
+  });
+  await withFetch(psdFetch, async () => {
+    const { body } = await lookup("tenant.bank.example");
+    assert.equal(body.dmarcDiscovery.source, "psd");
+    assert.equal(body.dmarcDiscovery.policyDomain, "bank.example");
+    assert.equal(body.dmarcDiscovery.organizationalDomain, "tenant.bank.example");
+    assert.equal(body.dmarcDiscovery.effectivePolicy, "reject");
+  });
+
+  const testingFetch = createFetch({
+    answers: {
+      "_dmarc.example.com|TXT": [{
+        type: 16,
+        TTL: 300,
+        data: "\"v=DMARC1; P=REJECT; T=Y;\"",
+      }],
+    },
+  });
+  await withFetch(testingFetch, async () => {
+    const { body } = await lookup();
+    assert.equal(body.dmarcDiscovery.source, "author");
+    assert.equal(body.dmarcDiscovery.requestedPolicy, "reject");
+    assert.equal(body.dmarcDiscovery.effectivePolicy, "quarantine");
+    assert.equal(body.dmarcDiscovery.testing, true);
+  });
+});
+
+test("DMARC Tree Walk never exceeds eight DNS queries", async () => {
+  const fetchImpl = createFetch();
+  const domain = "a.b.c.d.e.f.g.h.i.j.example.com";
+  await withFetch(fetchImpl, async () => {
+    const { body } = await lookup(domain);
+    assert.equal(body.dmarcDiscovery.queries.length, 8);
+    assert.equal(body.dmarcDiscovery.found, false);
+    assert.deepEqual(
+      body.dmarcDiscovery.queries.map((query) => query.domain),
+      [
+        domain,
+        "f.g.h.i.j.example.com",
+        "g.h.i.j.example.com",
+        "h.i.j.example.com",
+        "i.j.example.com",
+        "j.example.com",
+        "example.com",
+        "com",
+      ]
+    );
+  });
+  const dmarcCalls = fetchImpl.calls.filter((call) =>
+    new URL(call.url).searchParams.get("name")?.startsWith("_dmarc.")
+  );
+  assert.equal(dmarcCalls.length, 8);
+});
+
+test("DMARC np policy takes precedence for an NXDOMAIN author domain", async () => {
+  const fetchImpl = createFetch({
+    statuses: { "missing.example.com|NS": 3 },
+    answers: {
+      "_dmarc.example.com|TXT": [{
+        type: 16,
+        TTL: 300,
+        data: "\"v=DMARC1; p=reject; sp=quarantine; np=none; psd=n;\"",
+      }],
+    },
+  });
+  await withFetch(fetchImpl, async () => {
+    const { body } = await lookup("missing.example.com");
+    assert.equal(body.dmarcDiscovery.inherited, true);
+    assert.equal(body.dmarcDiscovery.requestedPolicy, "none");
+    assert.equal(body.dmarcDiscovery.effectivePolicy, "none");
+  });
+});
+
+test("maximum user-controlled fan-out stays at 42 subrequests", async () => {
+  const domain = "a.b.c.d.e.f.g.h.i.j.example.com";
+  const mxAnswers = Array.from({ length: 15 }, (_, index) => ({
+    type: 15,
+    TTL: 300,
+    data: `${index + 1} mx${index + 1}.example.com.`,
+  }));
+  const fetchImpl = createFetch({
+    answers: {
+      [`${domain}|MX`]: mxAnswers,
+      [`_mta-sts.${domain}|TXT`]: [{
+        type: 16,
+        TTL: 300,
+        data: "\"v=STSv1; id=20260804;\"",
+      }],
+    },
+    policy: { body: "version: STSv1\nmode: none\nmax_age: 0\n" },
+  });
+  await withFetch(fetchImpl, async () => {
+    const { response } = await lookup(domain, "one,two,three,four,five");
+    assert.equal(response.status, 200);
+  });
+  assert.equal(fetchImpl.calls.length, 42);
+});
+
 test("UI distinguishes found, valid, missing, and lookup failure", async () => {
   const response = await worker.fetch(new Request("https://local.test/"));
   const html = await response.text();
-  const openingTag = "<script>";
-  const closingTag = "</script>";
-  const scriptStart = html.indexOf(openingTag);
-  const scriptEnd = html.indexOf(closingTag, scriptStart + openingTag.length);
-  assert.notEqual(scriptStart, -1);
-  assert.notEqual(scriptEnd, -1);
-  const script = html.slice(scriptStart + openingTag.length, scriptEnd);
+  const script = extractInlineBlock(html, "script");
 
   const elements = {
     f: { addEventListener() {} },
@@ -274,10 +466,72 @@ test("UI distinguishes found, valid, missing, and lookup failure", async () => {
   assert.doesNotMatch(dmarcHeading, />OK<\/span>/);
   assert.match(dkimHeading, />Not found for selectors<\/span>/);
 
+  data.dnssec.a = true;
+  context.__ui.render(data);
+  const aHeading = context.__ui.out.innerHTML.match(/<h3>A[\s\S]*?<\/h3>/)?.[0];
+  const aaaaHeading = context.__ui.out.innerHTML.match(/<h3>AAAA[\s\S]*?<\/h3>/)?.[0];
+  assert.match(aHeading, />DNSSEC authenticated<\/span>/);
+  assert.match(aaaaHeading, />DNSSEC not authenticated<\/span>/);
+
   data.status.dmarc = 2;
   data.errors.dmarc = "DNS SERVFAIL (2)";
   context.__ui.render(data);
   const failedHeading = context.__ui.out.innerHTML.match(/<h3>DMARC[\s\S]*?<\/h3>/)?.[0];
   assert.match(failedHeading, />Lookup failed<\/span>/);
   assert.doesNotMatch(failedHeading, />Missing<\/span>/);
+});
+
+test("UI ignores a stale lookup that finishes after a newer request", async () => {
+  const response = await worker.fetch(new Request("https://local.test/"));
+  const html = await response.text();
+  const script = extractInlineBlock(html, "script");
+
+  let submitHandler;
+  const pending = [];
+  const elements = {
+    f: {
+      addEventListener(event, handler) {
+        if (event === "submit") submitHandler = handler;
+      },
+    },
+    name: { value: "first.example" },
+    selectors: { value: "" },
+    out: { innerHTML: "" },
+  };
+  const context = {
+    AbortController,
+    document: { getElementById: (id) => elements[id] },
+    encodeURIComponent,
+    fetch: () => new Promise((resolve) => pending.push(resolve)),
+  };
+  vm.runInNewContext(script, context);
+
+  const event = { preventDefault() {} };
+  const firstLookup = submitHandler(event);
+  elements.name.value = "second.example";
+  const secondLookup = submitHandler(event);
+
+  pending[1](new Response(JSON.stringify({ error: "new result" }), { status: 400 }));
+  await secondLookup;
+  assert.match(elements.out.innerHTML, /new result/);
+
+  pending[0](new Response(JSON.stringify({ error: "stale result" }), { status: 400 }));
+  await firstLookup;
+  assert.match(elements.out.innerHTML, /new result/);
+  assert.doesNotMatch(elements.out.innerHTML, /stale result/);
+});
+
+test("CSP authorizes only the exact inline UI blocks", async () => {
+  const response = await worker.fetch(new Request("https://local.test/"));
+  const html = await response.text();
+  const csp = response.headers.get("content-security-policy");
+  assert.ok(csp);
+  assert.doesNotMatch(csp, /unsafe-inline/);
+  assert.match(csp, /object-src 'none'/);
+
+  for (const tag of ["style", "script"]) {
+    const content = extractInlineBlock(html, tag);
+    const hash = createHash("sha256").update(content).digest("base64");
+    assert.ok(csp.includes(`'sha256-${hash}'`), `${tag} hash missing from CSP`);
+  }
 });

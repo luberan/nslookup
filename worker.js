@@ -2,6 +2,9 @@
 // DNS-over-HTTPS resolver: cloudflare-dns.com
 // See README.md for the full list of records and the API contract.
 
+const MAX_TLSA_HOSTS = 15;
+const MAX_DMARC_QUERIES = 8;
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -63,16 +66,33 @@ export default {
         .map((rr) => normalizeTxt(rr.data))
         .filter((txt) => /(^|\s)v=spf1\b/i.test(txt));
 
-      // Email-security queries (in parallel)
-      // RFC 7505: "null MX" (preference 0, exchange ".") — domain explicitly does not accept mail.
-      // De-duplicate and cap the MX list: bounds the number of parallel TLSA
-      // subrequests (Workers subrequest limit) and avoids the worker being
-      // abused as a traffic-reflection amplifier toward many MX hosts.
-      const mxHosts = [...new Set(
-        (results.MX?.answers || [])
-          .map((r) => r.exchange)
-          .filter((h) => h && h !== "." && h !== "")
-      )].slice(0, 20);
+      const mxRecords = [...(results.MX?.answers || [])]
+        .sort((left, right) => (left.preference ?? Infinity) - (right.preference ?? Infinity));
+      const nullMx = mxRecords.some(
+        (record) => record.preference === 0 && (record.exchange === "." || record.exchange === "")
+      );
+
+      // SMTP treats a domain with no MX RRset, but with an address record, as
+      // having one implicit MX pointing to itself (RFC 5321 section 5.1).
+      const seenMxHosts = new Set();
+      const mxCandidates = mxRecords
+        .filter((record) => record.exchange && record.exchange !== ".")
+        .filter((record) => {
+          if (seenMxHosts.has(record.exchange)) return false;
+          seenMxHosts.add(record.exchange);
+          return true;
+        })
+        .map((record) => ({
+          mx: record.exchange,
+          preference: record.preference,
+          implicit: false,
+        }));
+      const hasAddress = (results.A?.answers?.length || 0) > 0
+        || (results.AAAA?.answers?.length || 0) > 0;
+      if (!mxRecords.length && results.MX?.status === 0 && !results.MX?.error && hasAddress) {
+        mxCandidates.push({ mx: name, preference: 0, implicit: true });
+      }
+      const daneCandidates = mxCandidates.slice(0, MAX_TLSA_HOSTS);
 
       // DKIM: query each selector as both CNAME (Microsoft 365 delegation)
       // and TXT (most other providers publish the key directly as TXT).
@@ -80,11 +100,11 @@ export default {
         dohQuery(`${sel}._domainkey.${name}`, "CNAME"),
         dohQuery(`${sel}._domainkey.${name}`, "TXT"),
       ]);
-      const tlsaJobs = mxHosts.map((mx) => dohQuery(`_25._tcp.${mx}`, "TLSA"));
+      const tlsaJobs = daneCandidates.map(({ mx }) => dohQuery(`_25._tcp.${mx}`, "TLSA"));
 
-      const [dmarcQ, mtaStsQ, tlsRptQ, bimiQ, ...rest] =
+      const [dmarcDiscovery, mtaStsQ, tlsRptQ, bimiQ, ...rest] =
         await Promise.all([
-          dohQuery(`_dmarc.${name}`, "TXT"),
+          discoverDmarcPolicy(name, results.NS?.status !== 3),
           dohQuery(`_mta-sts.${name}`, "TXT"),
           dohQuery(`_smtp._tls.${name}`, "TXT"),
           dohQuery(`default._bimi.${name}`, "TXT"),
@@ -95,9 +115,7 @@ export default {
       const dkimRes = rest.slice(0, dkimJobs.length);
       const tlsaResults = rest.slice(dkimJobs.length);
 
-      const dmarc = (dmarcQ.answers || [])
-        .map((rr) => normalizeTxt(rr.data))
-        .filter((txt) => /^v=DMARC1\b/i.test(txt));
+      const dmarc = dmarcDiscovery.records;
 
       const mtaStsRecords = (mtaStsQ.answers || []).map((rr) => normalizeTxt(rr.data));
       const mtaSts = mtaStsRecords.filter((txt) => /^v=STSv1(?:\s*;|$)/.test(txt));
@@ -145,8 +163,8 @@ export default {
         };
       });
 
-      const dane = mxHosts.map((mx, i) => ({
-        mx,
+      const dane = daneCandidates.map((candidate, i) => ({
+        ...candidate,
         tlsa: tlsaResults[i]?.answers || [],
         // DANE without DNSSEC is meaningless — propagate the AD bit from the DoH response
         dnssec: !!tlsaResults[i]?.ad,
@@ -154,28 +172,31 @@ export default {
         error: tlsaResults[i]?.error || null,
       }));
 
-      // Null MX detection (RFC 7505)
-      const nullMx = (results.MX?.answers || []).some(
-        (r) => r.preference === 0 && (r.exchange === "." || r.exchange === "")
-      );
-
       return json({
         domain: name,
         ns: results.NS?.answers || [],
         a: results.A?.answers || [],
         aaaa: results.AAAA?.answers || [],
-        mx: results.MX?.answers || [],
+        mx: mxRecords,
         nullMx,
         spf,
         dkim,
         dkimCustom,
         dmarc,
+        dmarcDiscovery,
         mtaSts,
         mtaStsValidation,
         mtaStsPolicy,
         tlsRpt,
         bimi,
         dane,
+        daneMeta: {
+          candidates: mxCandidates.length,
+          checked: daneCandidates.length,
+          truncated: mxCandidates.length > daneCandidates.length,
+          limit: MAX_TLSA_HOSTS,
+          implicitMx: mxCandidates.some((candidate) => candidate.implicit),
+        },
         // Summary of DNSSEC status for the basic queries (AD bit from DoH)
         dnssec: {
           ns: !!results.NS?.ad,
@@ -183,7 +204,7 @@ export default {
           aaaa: !!results.AAAA?.ad,
           mx: !!results.MX?.ad,
           txt: !!results.TXT?.ad,
-          dmarc: !!dmarcQ.ad,
+          dmarc: !!dmarcDiscovery.dnssec,
           mtaStsTxt: !!mtaStsQ.ad,
           tlsRpt: !!tlsRptQ.ad,
           bimi: !!bimiQ.ad,
@@ -195,7 +216,7 @@ export default {
           aaaa: results.AAAA?.status ?? null,
           mx: results.MX?.status ?? null,
           txt: results.TXT?.status ?? null,
-          dmarc: dmarcQ.status ?? null,
+          dmarc: dmarcDiscovery.status,
           mtaStsTxt: mtaStsQ.status ?? null,
           tlsRpt: tlsRptQ.status ?? null,
           bimi: bimiQ.status ?? null,
@@ -206,7 +227,7 @@ export default {
           aaaa: results.AAAA?.error || null,
           mx: results.MX?.error || null,
           txt: results.TXT?.error || null,
-          dmarc: dmarcQ.error || null,
+          dmarc: dmarcDiscovery.error,
           mtaStsTxt: mtaStsQ.error || null,
           tlsRpt: tlsRptQ.error || null,
           bimi: bimiQ.error || null,
@@ -260,6 +281,183 @@ function parseDkimSelectors(raw) {
   );
   if (!valid) return null;
   return list.slice(0, 5);
+}
+
+function dmarcTreeTargets(domain) {
+  const labels = domain.split(".");
+  const targets = [domain];
+  let remaining = labels.length <= MAX_DMARC_QUERIES
+    ? labels.slice(1)
+    : labels.slice(-(MAX_DMARC_QUERIES - 1));
+  while (remaining.length && targets.length < MAX_DMARC_QUERIES) {
+    targets.push(remaining.join("."));
+    remaining = remaining.slice(1);
+  }
+  return targets;
+}
+
+function hasDmarcVersion(record) {
+  const first = record.split(";", 1)[0];
+  const match = /^([A-Za-z]+)\s*=\s*(\S+)\s*$/.exec(first);
+  return !!match && match[1].toLowerCase() === "v" && match[2] === "DMARC1";
+}
+
+function parseDmarcRecord(record) {
+  const fields = record.split(";");
+  if (fields.at(-1)?.trim() === "") fields.pop();
+  if (!fields.length || fields.some((field) => !field.trim())) {
+    return { valid: false, reason: "invalid empty DMARC field" };
+  }
+
+  const tags = Object.create(null);
+  for (const field of fields) {
+    const match = /^([A-Za-z]+)\s*=\s*([\x20-\x3A\x3C-\x7E]+)$/.exec(field.trim());
+    if (!match) return { valid: false, reason: "invalid DMARC tag-value syntax" };
+    const key = match[1].toLowerCase();
+    const value = match[2].trim();
+    if (Object.hasOwn(tags, key)) {
+      return { valid: false, reason: `duplicate DMARC tag: ${key}` };
+    }
+    tags[key] = value;
+  }
+  if (tags.v !== "DMARC1" || fields[0].trim().split("=", 1)[0].trim().toLowerCase() !== "v") {
+    return { valid: false, reason: "DMARC record must begin with v=DMARC1" };
+  }
+
+  const warnings = [];
+  const choices = {
+    p: new Set(["none", "quarantine", "reject"]),
+    sp: new Set(["none", "quarantine", "reject"]),
+    np: new Set(["none", "quarantine", "reject"]),
+    psd: new Set(["y", "n", "u"]),
+    t: new Set(["y", "n"]),
+    adkim: new Set(["r", "s"]),
+    aspf: new Set(["r", "s"]),
+  };
+  for (const [key, allowed] of Object.entries(choices)) {
+    if (Object.hasOwn(tags, key)) {
+      const normalized = tags[key].toLowerCase();
+      if (allowed.has(normalized)) {
+        tags[key] = normalized;
+      } else {
+        warnings.push(`ignored invalid ${key} tag`);
+        delete tags[key];
+      }
+    }
+  }
+  return { valid: true, tags, warnings };
+}
+
+function applyDmarcTestMode(policy, testing) {
+  if (!testing || policy === "none") return policy;
+  return policy === "reject" ? "quarantine" : "none";
+}
+
+function finalizeDmarcDiscovery(domain, domainExists, queries, selected, error = null) {
+  if (!selected || error) {
+    return {
+      found: false,
+      valid: false,
+      records: [],
+      policyDomain: null,
+      organizationalDomain: null,
+      source: null,
+      inherited: false,
+      requestedPolicy: null,
+      effectivePolicy: null,
+      testing: false,
+      dnssec: !error && queries.length > 0 && queries.every((query) => query.dnssec),
+      status: queries.at(-1)?.status ?? null,
+      error,
+      queries,
+      warnings: [],
+    };
+  }
+
+  const { target, raw, parsed, query } = selected;
+  const inherited = target !== domain;
+  const source = !inherited ? "author" : parsed.tags.psd === "y" ? "psd" : "organizational";
+  let organizationalDomain = null;
+  if (source === "organizational") {
+    organizationalDomain = target;
+  } else if (source === "psd") {
+    const domainLabels = domain.split(".");
+    const psdLabelCount = target.split(".").length;
+    organizationalDomain = domainLabels.length > psdLabelCount
+      ? domainLabels.slice(-(psdLabelCount + 1)).join(".")
+      : domain;
+  }
+
+  const requestedPolicy = inherited
+    ? (!domainExists && parsed.tags.np) || parsed.tags.sp || parsed.tags.p || "none"
+    : parsed.tags.p || "none";
+  const testing = parsed.tags.t === "y";
+  return {
+    found: true,
+    valid: true,
+    records: [raw],
+    tags: parsed.tags,
+    policyDomain: target,
+    organizationalDomain,
+    source,
+    inherited,
+    requestedPolicy,
+    effectivePolicy: applyDmarcTestMode(requestedPolicy, testing),
+    testing,
+    dnssec: query.dnssec,
+    status: query.status,
+    error: null,
+    queries,
+    warnings: parsed.warnings,
+  };
+}
+
+async function discoverDmarcPolicy(domain, domainExists) {
+  const queries = [];
+  const discovered = [];
+  const targets = dmarcTreeTargets(domain);
+
+  for (let index = 0; index < targets.length; index++) {
+    const target = targets[index];
+    const qname = `_dmarc.${target}`;
+    const result = await dohQuery(qname, "TXT");
+    const records = (result.answers || []).map((answer) => normalizeTxt(answer.data));
+    const candidates = records.filter(hasDmarcVersion);
+    let parsed = null;
+    let warning = null;
+    if (candidates.length === 1) {
+      parsed = parseDmarcRecord(candidates[0]);
+      if (!parsed.valid) warning = parsed.reason;
+    } else if (candidates.length > 1) {
+      warning = "multiple DMARC policy records were discarded";
+    }
+
+    const query = {
+      domain: target,
+      qname,
+      status: result.status ?? null,
+      dnssec: !!result.ad,
+      error: result.error || null,
+      recordCount: candidates.length,
+      valid: !!parsed?.valid,
+      warning,
+    };
+    queries.push(query);
+    if (result.error) {
+      return finalizeDmarcDiscovery(domain, domainExists, queries, null, result.error);
+    }
+
+    if (parsed?.valid) {
+      const entry = { target, raw: candidates[0], parsed, query };
+      if (index === 0) {
+        return finalizeDmarcDiscovery(domain, domainExists, queries, entry);
+      }
+      discovered.push(entry);
+      if (parsed.tags.psd === "y" || parsed.tags.psd === "n") break;
+    }
+  }
+
+  return finalizeDmarcDiscovery(domain, domainExists, queries, discovered.at(-1) || null);
 }
 
 function validateMtaStsTxt(records) {
@@ -324,7 +522,7 @@ function htmlHeaders() {
     "content-type": "text/html; charset=utf-8",
     "cache-control": "public, max-age=3600",
     "content-security-policy":
-      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: https://www.lukasberan.cz; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "default-src 'self'; script-src 'sha256-qXVM1pSPoPjujJHI2b8fgk6yCEcVTH4m7cXjsKkfD8A='; style-src 'sha256-H7JOsu5HqOAY71Wd8an+mR2ohltM2jtETPoATdZfLwo='; connect-src 'self'; img-src 'self' data: https://www.lukasberan.cz; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
     "x-frame-options": "DENY",
     ...securityHeaders(),
   };
@@ -712,21 +910,30 @@ const HTML = `<!doctype html>
     const nameEl = document.getElementById('name');
     const selectorsEl = document.getElementById('selectors');
     const out = document.getElementById('out');
+    let lookupController = null;
+    let lookupSequence = 0;
 
     f.addEventListener('submit', async (e) => {
       e.preventDefault();
+      lookupController?.abort();
+      lookupController = new AbortController();
+      const sequence = ++lookupSequence;
       out.innerHTML = '<p class="muted">Querying DNS…</p>';
       const name = nameEl.value.trim();
       const selectors = (selectorsEl.value || '').trim();
       try {
         let url = '/api/dns?name=' + encodeURIComponent(name);
         if (selectors) url += '&selectors=' + encodeURIComponent(selectors);
-        const res = await fetch(url);
+        const res = await fetch(url, { signal: lookupController.signal });
         const data = await res.json();
+        if (sequence !== lookupSequence) return;
         if (!res.ok) throw new Error(data.error || 'Unknown error');
         render(data);
       } catch (err) {
+        if (err.name === 'AbortError' || sequence !== lookupSequence) return;
         out.innerHTML = '<p class="err">' + esc(err.message) + '</p>';
+      } finally {
+        if (sequence === lookupSequence) lookupController = null;
       }
     });
 
@@ -751,6 +958,13 @@ const HTML = `<!doctype html>
     function recordBadge(records, status, error) {
       if (lookupError(status, error)) return badgeWarn('Lookup failed');
       return records && records.length ? badgeInfo('Found') : badge(false, '', 'Missing');
+    }
+
+    function dnssecBadge(status, error, authenticated) {
+      if (lookupError(status, error) || status !== 0) return '';
+      return authenticated
+        ? badge(true, 'DNSSEC authenticated', '')
+        : badgeInfo('DNSSEC not authenticated');
     }
 
     function panel(title, items, full) {
@@ -805,7 +1019,26 @@ const HTML = `<!doctype html>
         errors.mx
       );
       const spf = queryItems(li(data.spf, s => '<code>' + esc(s) + '</code>'), st.txt, errors.txt);
-      const dmarc = queryItems(li(data.dmarc, s => '<code>' + esc(s) + '</code>'), st.dmarc, errors.dmarc);
+      const dmarcInfo = data.dmarcDiscovery || {};
+      let dmarcDetails = '';
+      if (dmarcInfo.found) {
+        if (dmarcInfo.inherited) {
+          dmarcDetails += '<li class="muted">Inherited from <code>_dmarc.'
+            + esc(dmarcInfo.policyDomain) + '</code> (' + esc(dmarcInfo.source) + ' policy).</li>';
+        }
+        dmarcDetails += '<li>Requested policy: <code>' + esc(dmarcInfo.requestedPolicy)
+          + '</code>; effective policy: <code>' + esc(dmarcInfo.effectivePolicy) + '</code></li>';
+        if (dmarcInfo.testing) dmarcDetails += '<li class="muted">Test mode (<code>t=y</code>) is active.</li>';
+      }
+      (dmarcInfo.queries || []).filter(query => query.warning).forEach(query => {
+        dmarcDetails += '<li class="err"><code>' + esc(query.qname) + '</code>: '
+          + esc(query.warning) + '</li>';
+      });
+      const dmarc = queryItems(
+        li(data.dmarc, s => '<code>' + esc(s) + '</code>') + dmarcDetails,
+        st.dmarc,
+        errors.dmarc
+      );
       const stsValidation = data.mtaStsValidation || {};
       const mtaStsValidationItem = !errors.mtaStsTxt && stsValidation.found && !stsValidation.valid && stsValidation.reason
         ? '<li class="err">Validation: ' + esc(stsValidation.reason) + '</li>'
@@ -829,6 +1062,7 @@ const HTML = `<!doctype html>
           const txt = sel.txt || [];
           const selStatus = sel.status || {};
           const selErrors = sel.errors || {};
+          const selDnssec = sel.dnssec || {};
           const cnameError = lookupError(selStatus.cname, selErrors.cname);
           const txtError = lookupError(selStatus.txt, selErrors.txt);
           if (cnameError) {
@@ -838,13 +1072,20 @@ const HTML = `<!doctype html>
             dkItems += '<li class="err"><code>' + esc(qname) + '</code> TXT lookup failed: ' + esc(txtError) + '</li>';
           }
           if (!cname.length && !txt.length && !cnameError && !txtError) {
-            dkItems += '<li><code>' + esc(qname) + '</code> — not found</li>';
+            const authenticated = selStatus.cname === 0 && selStatus.txt === 0
+              && selDnssec.cname && selDnssec.txt;
+            const selectorDnssec = selStatus.cname === 0 && selStatus.txt === 0
+              ? dnssecBadge(0, null, authenticated)
+              : '';
+            dkItems += '<li><code>' + esc(qname) + '</code> — not found' + selectorDnssec + '</li>';
           } else {
             cname.forEach(r => {
-              dkItems += '<li><code>' + esc(qname) + '</code> <span class="muted">(CNAME)</span> → <code>' + esc(r.data) + '</code>' + ttl(r) + '</li>';
+              dkItems += '<li><code>' + esc(qname) + '</code> <span class="muted">(CNAME)</span> → <code>' + esc(r.data) + '</code>' + ttl(r)
+                + dnssecBadge(selStatus.cname, selErrors.cname, selDnssec.cname) + '</li>';
             });
             txt.forEach(r => {
-              dkItems += '<li><code>' + esc(qname) + '</code> <span class="muted">(TXT)</span> → <code>' + esc(r.data) + '</code>' + ttl(r) + '</li>';
+              dkItems += '<li><code>' + esc(qname) + '</code> <span class="muted">(TXT)</span> → <code>' + esc(r.data) + '</code>' + ttl(r)
+                + dnssecBadge(selStatus.txt, selErrors.txt, selDnssec.txt) + '</li>';
             });
           }
         });
@@ -871,24 +1112,25 @@ const HTML = `<!doctype html>
       if (data.dane && data.dane.length > 0) {
         let ditems = '';
         data.dane.forEach(entry => {
+          const implicitLabel = entry.implicit ? ' <span class="muted">(implicit MX)</span>' : '';
           const queryError = lookupError(entry.status, entry.error);
           if (queryError) {
-            ditems += '<li class="err"><strong>' + esc(entry.mx) + '</strong> — lookup failed: ' + esc(queryError) + '</li>';
+            ditems += '<li class="err"><strong>' + esc(entry.mx) + '</strong>' + implicitLabel + ' — lookup failed: ' + esc(queryError) + '</li>';
             return;
           }
           const dnssecBadge = entry.tlsa.length
-            ? (entry.dnssec ? badge(true, 'DNSSEC OK', '') : badgeWarn('DNSSEC missing — TLSA untrusted'))
+            ? (entry.dnssec ? badge(true, 'DNSSEC authenticated', '') : badgeWarn('TLSA not authenticated — untrusted'))
             : '';
           if (entry.tlsa.length === 0) {
-            ditems += '<li><strong>' + esc(entry.mx) + '</strong> — no TLSA record</li>';
+            ditems += '<li><strong>' + esc(entry.mx) + '</strong>' + implicitLabel + ' — no TLSA record</li>';
           } else {
             entry.tlsa.forEach(t => {
               if (t.error) {
-                ditems += '<li><strong>' + esc(entry.mx) + '</strong> ' + dnssecBadge
+                ditems += '<li><strong>' + esc(entry.mx) + '</strong>' + implicitLabel + ' ' + dnssecBadge
                   + ' — invalid TLSA data: <code>' + esc(t.raw || '') + '</code>' + ttl(t) + '</li>';
                 return;
               }
-              ditems += '<li><strong>' + esc(entry.mx) + '</strong> ' + dnssecBadge + ': '
+              ditems += '<li><strong>' + esc(entry.mx) + '</strong>' + implicitLabel + ' ' + dnssecBadge + ': '
                 + (TLSA_USAGE[t.usage] || t.usage) + ', '
                 + (TLSA_SEL[t.selector] || t.selector) + ', '
                 + (TLSA_MATCH[t.matchingType] || t.matchingType)
@@ -897,6 +1139,10 @@ const HTML = `<!doctype html>
             });
           }
         });
+        if (data.daneMeta && data.daneMeta.truncated) {
+          ditems = '<li class="muted">TLSA checked for ' + data.daneMeta.checked + ' of '
+            + data.daneMeta.candidates + ' MX hosts (limit ' + data.daneMeta.limit + ').</li>' + ditems;
+        }
         daneHtml = ditems;
       }
 
@@ -930,21 +1176,23 @@ const HTML = `<!doctype html>
         : data.dane && data.dane.length
           ? (daneFound ? badgeInfo('Found') : badge(false, '', 'Missing'))
           : badgeInfo('Not checked');
+          const dmarcPolicyDomain = dmarcInfo.policyDomain || d;
 
       out.innerHTML =
-        panel('NS' + (ds.ns ? badge(true,'DNSSEC','') : ''), ns, true) +
-        panel('A', a) + panel('AAAA', aaaa) +
-        panel('MX', mx) +
+        panel('NS' + dnssecBadge(st.ns, errors.ns, ds.ns), ns, true) +
+        panel('A' + dnssecBadge(st.a, errors.a, ds.a), a) +
+        panel('AAAA' + dnssecBadge(st.aaaa, errors.aaaa, ds.aaaa), aaaa) +
+        panel('MX' + dnssecBadge(st.mx, errors.mx, ds.mx), mx) +
         nullMxNotice +
-        panel('SPF (TXT)' + recordBadge(data.spf, st.txt, errors.txt) + (data.spf && data.spf.length > 1 ? badgeWarn('Multiple SPF records — misconfiguration') : ''), spf) +
+        panel('SPF (TXT)' + recordBadge(data.spf, st.txt, errors.txt) + dnssecBadge(st.txt, errors.txt, ds.txt) + (data.spf && data.spf.length > 1 ? badgeWarn('Multiple SPF records — misconfiguration') : ''), spf) +
         '<div class="section-title">Email security</div>' +
         panel('DKIM — ' + (data.dkimCustom ? 'custom selectors' : 'Microsoft 365') + dkimBadge, dkimHtml, true) +
-        panel('DMARC (_dmarc.' + esc(d) + ')' + recordBadge(data.dmarc, st.dmarc, errors.dmarc) + (data.dmarc && data.dmarc.length > 1 ? badgeWarn('Multiple DMARC records') : ''), dmarc, true) +
-        panel('MTA-STS TXT (_mta-sts.' + esc(d) + ')' + stsTxtBadge, mtaSts) +
+        panel('DMARC (_dmarc.' + esc(dmarcPolicyDomain) + ')' + recordBadge(data.dmarc, st.dmarc, errors.dmarc) + dnssecBadge(st.dmarc, errors.dmarc, ds.dmarc) + (dmarcInfo.inherited ? badgeInfo('Inherited') : ''), dmarc, true) +
+        panel('MTA-STS TXT (_mta-sts.' + esc(d) + ')' + stsTxtBadge + dnssecBadge(st.mtaStsTxt, errors.mtaStsTxt, ds.mtaStsTxt), mtaSts) +
         panel('MTA-STS Policy' + stsPolicyBadge, mtaStsPol) +
-        panel('TLS-RPT (_smtp._tls.' + esc(d) + ')' + recordBadge(data.tlsRpt, st.tlsRpt, errors.tlsRpt) + (data.tlsRpt && data.tlsRpt.length > 1 ? badgeWarn('Multiple TLS-RPT records') : ''), tlsRpt) +
-        panel('BIMI (default._bimi.' + esc(d) + ')' + recordBadge(data.bimi, st.bimi, errors.bimi), bimi) +
-        panel('DANE / TLSA' + daneBadge + (data.dane && data.dane.some(e => e.tlsa.length && !e.dnssec) ? badgeWarn('No DNSSEC') : ''), daneHtml, true);
+        panel('TLS-RPT (_smtp._tls.' + esc(d) + ')' + recordBadge(data.tlsRpt, st.tlsRpt, errors.tlsRpt) + dnssecBadge(st.tlsRpt, errors.tlsRpt, ds.tlsRpt) + (data.tlsRpt && data.tlsRpt.length > 1 ? badgeWarn('Multiple TLS-RPT records') : ''), tlsRpt) +
+        panel('BIMI (default._bimi.' + esc(d) + ')' + recordBadge(data.bimi, st.bimi, errors.bimi) + dnssecBadge(st.bimi, errors.bimi, ds.bimi), bimi) +
+        panel('DANE / TLSA' + daneBadge + (data.dane && data.dane.some(e => e.tlsa.length && !e.dnssec) ? badgeWarn('TLSA not authenticated') : ''), daneHtml, true);
     }
   </script>
 </body>
