@@ -15,7 +15,8 @@ See [README.md](README.md) for the feature list and API reference.
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) 18 or newer (for `npx wrangler`).
+- [Node.js](https://nodejs.org/) 24 LTS. The required major version is also
+   recorded in `.nvmrc` and `package.json`.
 - A [Cloudflare account](https://dash.cloudflare.com/) if you want to deploy.
 - [Wrangler](https://developers.cloudflare.com/workers/wrangler/) — invoked via
   `npx`, no global install required.
@@ -28,6 +29,7 @@ Clone the repository, install dev dependencies, and start the worker locally:
 git clone https://github.com/luberan/nslookup.git
 cd nslookup
 npm install
+npm test
 npm run dev
 ```
 
@@ -62,8 +64,8 @@ login`). The committed `wrangler.toml` already provides `name` / `main`.
    ```
 3. **Make your change** in `worker.js` (and update `README.md` if behavior or
    the API surface changes).
-4. **Test manually** with `npx wrangler dev` against a few representative
-   domains — see [Testing](#testing) below.
+4. **Run `npm run ci`**, then test manually with `npm run dev` against a few
+   representative domains — see [Testing](#testing) below.
 5. **Commit** using a [Conventional Commits](https://www.conventionalcommits.org/)
    style prefix (see below).
 6. **Open a pull request** against `main` and describe the motivation,
@@ -88,6 +90,7 @@ Keep the subject line under 72 characters and write it in the imperative mood.
 - [ ] No secrets, API tokens, or personal domains are committed.
 - [ ] Security-relevant code paths (input validation, SSRF guards, security
       headers) keep their existing safeguards.
+- [ ] `npm run ci` passes on Node.js 24 LTS.
 - [ ] You tested the change locally with `npx wrangler dev`.
 
 ## Coding conventions
@@ -125,8 +128,14 @@ of opening a public issue or PR.
 
 ## Testing
 
-There is no automated test suite. Please perform at least the following manual
-checks against your local `wrangler dev` instance before opening a PR:
+Run the automated regression suite and packaging check first:
+
+```bash
+npm run ci
+```
+
+Then perform at least the following manual checks against your local
+`wrangler dev` instance before opening a PR:
 
 1. A well-configured domain (e.g. `microsoft.com`) returns all expected
    records.

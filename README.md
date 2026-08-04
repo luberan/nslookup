@@ -31,9 +31,15 @@ Every DoH query uses the `do=1` flag and propagates the **AD bit** (Authenticate
 ### Configuration validation
 The UI warns about common configuration mistakes:
 - Multiple SPF / DMARC / MTA-STS / TLS-RPT records (RFC violation)
+- Invalid MTA-STS discovery records and policy files
 - TLSA records without DNSSEC validation
 - Null MX (informational)
 - NXDOMAIN — the entire domain does not exist
+
+For protocols that are only discovered, the UI says **Found**, not **OK**.
+Only configurations that the tool fully validates (currently MTA-STS and the
+DNSSEC trust state for TLSA) receive a **Valid** / **DNSSEC OK** indicator.
+Resolver failures are shown as lookup errors and never as missing records.
 
 ## API
 
@@ -64,22 +70,29 @@ Returns JSON with all results. DNS queries run in parallel via DNS-over-HTTPS (`
   "dkimCustom": false,
   "dmarc": ["v=DMARC1; p=reject; rua=mailto:dmarc@example.com"],
   "mtaSts": ["v=STSv1; id=20240101000000Z"],
-  "mtaStsPolicy": { "found": true, "policy": { "version": "STSv1", "mode": "enforce", "max_age": "604800", "mx": ["*.example.com"] } },
+  "mtaStsValidation": { "found": true, "valid": true, "record": "v=STSv1; id=20240101000000Z", "id": "20240101000000Z" },
+  "mtaStsPolicy": { "found": true, "valid": true, "policy": { "version": "STSv1", "mode": "enforce", "max_age": "604800", "mx": ["*.example.com"] } },
   "tlsRpt": ["v=TLSRPTv1; rua=mailto:tlsrpt@example.com"],
   "bimi": ["v=BIMI1; l=https://example.com/logo.svg"],
   "dane": [{ "mx": "mail.example.com", "tlsa": [], "dnssec": true, "status": 0 }],
   "dnssec": { "ns": true, "a": true, "aaaa": true, "mx": true, "txt": true, "dmarc": true, "mtaStsTxt": true, "tlsRpt": true, "bimi": true },
-  "status":  { "ns": 0, "a": 0, "aaaa": 0, "mx": 0, "txt": 0, "dmarc": 0, "mtaStsTxt": 0, "tlsRpt": 0, "bimi": 0 }
+  "status":  { "ns": 0, "a": 0, "aaaa": 0, "mx": 0, "txt": 0, "dmarc": 0, "mtaStsTxt": 0, "tlsRpt": 0, "bimi": 0 },
+  "errors":  { "ns": null, "a": null, "aaaa": null, "mx": null, "txt": null, "dmarc": null, "mtaStsTxt": null, "tlsRpt": null, "bimi": null }
 }
 ```
 
 DoH `Status` codes: `0` = OK, `2` = SERVFAIL, `3` = NXDOMAIN.
+Non-zero resolver statuses and transport failures are also exposed in
+`errors`. If all five base DNS queries fail, the API returns `502` instead of
+a misleading empty `200` response.
 
 ### Input validation
 - Max 253 characters total, max 63 characters per label
 - A label must not start or end with a hyphen
 - At least 2 labels (TLD + SLD)
 - Unicode → punycode via the `URL` parser
+- Domain-only input: URL components, credentials, ports, paths, IP literals,
+  whitespace and backslashes are rejected rather than silently normalized
 - DKIM `selectors` (optional): each validated as DNS label(s), deduplicated, capped at 5 (invalid input → `400`)
 
 ### CORS
@@ -110,11 +123,14 @@ The worker sends a complete set of security headers:
 > tighten `script-src` / `style-src` to `'self'`.
 
 **MTA-STS policy fetch** is hardened against SSRF / abuse:
+- Performed only after one syntactically valid `_mta-sts` discovery TXT record
+  with a valid `id` is found
 - Domain re-validated before being used in the URL
 - 5s timeout (`AbortController`)
 - 64 KB limit (RFC 8461), enforced while streaming so an oversized body is never fully buffered
 - `redirect: "manual"` — redirects are reported but never followed (RFC 8461 §3.3; prevents redirect-based SSRF to an arbitrary target)
-- `Content-Type: text/plain` check
+- Strict `Content-Type: text/plain`, version, mode, `max_age` and MX-pattern validation
+- `cache: "no-store"` — RFC 8461 forbids HTTP caching by policy clients
 
 **Recommendation for production deployment:**
 - Configure rate limiting in the Cloudflare Dashboard (Security rules → Rate limiting rules) — e.g. `10 req / 10 s per IP` for `/api/dns`.
@@ -124,15 +140,17 @@ The worker sends a complete set of security headers:
 - **HTML** template — `Cache-Control: public, max-age=3600`
 - **JSON API** — `Cache-Control: public, max-age=60` (successful responses)
 - **DoH queries** — `cf: { cacheTtl: 60, cacheEverything: true }` (Cloudflare edge cache)
-- **MTA-STS policy** — `cf: { cacheTtl: 300 }`
+- **MTA-STS policy** — never HTTP-cached (`cache: "no-store"`)
 
 ## Deployment
 
-The repository ships a ready-to-use `wrangler.toml` (no secrets). After
-authenticating with `npx wrangler login`, deploy with:
+The development toolchain requires **Node.js 24 LTS** (also recorded in
+`.nvmrc` and `package.json`). The repository ships a lockfile and a
+ready-to-use `wrangler.toml` (no secrets). Install, test, and deploy with:
 
 ```bash
-npm install
+npm ci
+npm run ci
 npm run deploy
 ```
 
@@ -141,6 +159,10 @@ Or, without `npm install`:
 ```bash
 npx wrangler deploy worker.js
 ```
+
+`npm run ci` performs a syntax check, runs the dependency-free Node test suite,
+and verifies Wrangler packaging with `deploy --dry-run`. The same command runs
+in GitHub Actions on Node.js 24.
 
 ## Forking / running your own instance
 

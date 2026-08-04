@@ -22,10 +22,11 @@ For larger changes, open an issue first to discuss the design.
 ## How was this tested?
 
 <!--
-Describe the manual test steps you performed against `npx wrangler dev`.
+Describe the automated and manual test steps you performed.
 Mention the domains you queried and what you verified.
 -->
 
+- [ ] `npm run ci` passes on Node.js 24 LTS
 - [ ] Tested locally with `npx wrangler dev worker.js`
 - [ ] Verified the JSON API response for at least one well-configured domain
 - [ ] Verified the HTML UI renders without console errors

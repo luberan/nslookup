@@ -2,6 +2,7 @@
   "name": "nslookup",
   "version": "1.1.0",
   "private": true,
+  "type": "module",
   "description": "Cloudflare Worker for comprehensive DNS analysis of a domain, with a focus on email security and DNSSEC validation.",
   "license": "MIT",
   "author": "Lukas Beran",
@@ -15,6 +16,9 @@
   },
   "main": "worker.js",
   "scripts": {
+    "check": "node --check worker.js",
+    "test": "node --test",
+    "ci": "npm run check && npm test && wrangler deploy --dry-run",
     "dev": "wrangler dev worker.js",
     "start": "wrangler dev worker.js",
     "deploy": "wrangler deploy worker.js",
@@ -23,8 +27,11 @@
   "devDependencies": {
     "wrangler": "^4.93.1"
   },
+  "overrides": {
+    "undici": "7.29.0"
+  },
   "engines": {
-    "node": ">=18"
+    "node": "24.x"
   },
   "keywords": [
     "cloudflare-workers",
