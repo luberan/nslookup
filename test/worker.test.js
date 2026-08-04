@@ -203,8 +203,13 @@ test("malformed TLSA fields are reported as invalid data", async () => {
 test("UI distinguishes found, valid, missing, and lookup failure", async () => {
   const response = await worker.fetch(new Request("https://local.test/"));
   const html = await response.text();
-  const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
-  assert.ok(script);
+  const openingTag = "<script>";
+  const closingTag = "</script>";
+  const scriptStart = html.indexOf(openingTag);
+  const scriptEnd = html.indexOf(closingTag, scriptStart + openingTag.length);
+  assert.notEqual(scriptStart, -1);
+  assert.notEqual(scriptEnd, -1);
+  const script = html.slice(scriptStart + openingTag.length, scriptEnd);
 
   const elements = {
     f: { addEventListener() {} },
