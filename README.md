@@ -9,7 +9,8 @@ Cloudflare Worker for comprehensive DNS analysis of a domain, with a focus on em
 - **A / AAAA** — IPv4 and IPv6 addresses
 - **MX** — mail exchange records (sorted by priority)
 - **SPF** — Sender Policy Framework (extracted from TXT)
-- **Null MX** detection (RFC 7505) — domain explicitly does not accept email
+- **Null MX** detection (RFC 7505) - a sole null MX indicates no mail service; mixed null and ordinary MX records are reported as a configuration conflict
+- **CNAME metadata** - preserves the alias chain and distinguishes an existing alias from an NXDOMAIN target
 - **IDN** support — Unicode domains (e.g. `háčkydomény.cz`) are automatically converted to A-label (punycode)
 
 ### Email security
@@ -18,10 +19,10 @@ Cloudflare Worker for comprehensive DNS analysis of a domain, with a focus on em
 | **DKIM** | `<selector>._domainkey.<domain>` (CNAME + TXT) | Defaults to the Microsoft 365 selectors `selector1` / `selector2`. Override with `?selectors=` (comma-separated, max 5). Each selector is queried as **CNAME** (Microsoft 365 delegation) and **TXT** (direct keys, e.g. Google Workspace, Mailgun). |
 | **DMARC** | RFC 9989 DNS Tree Walk | Checks the Author Domain first, then walks toward the root (max 8 queries) to discover inherited Organizational Domain or Public Suffix Domain policy. Reports `p`, `sp`, `np`, `psd`, and `t` effects. |
 | **MTA-STS TXT** | `_mta-sts.<domain>` | MTA Strict Transport Security identifier |
-| **MTA-STS Policy** | `https://mta-sts.<domain>/.well-known/mta-sts.txt` | Fetch and parse the MTA-STS policy (mode, max_age, mx) |
+| **MTA-STS Policy** | `https://mta-sts.<domain>/.well-known/mta-sts.txt` | Validate policy syntax and match every receiving MX against its patterns, including backup MX hosts |
 | **TLS-RPT** | `_smtp._tls.<domain>` | SMTP TLS Reporting |
 | **BIMI** | `default._bimi.<domain>` | Brand Indicators for Message Identification |
-| **DANE / TLSA** | `_25._tcp.<mx-host>` for each MX | DNS-based Authentication of Named Entities (with DNSSEC validation). MX hosts are sorted by priority and capped at 15; coverage metadata makes truncation explicit. Domains with no MX but a valid A/AAAA record use the RFC 5321 implicit MX. |
+| **DANE / TLSA** | `_25._tcp.<mx-host>` for each MX | DNS-based Authentication of Named Entities (with DNSSEC validation). MX hosts are sorted by priority and capped at 15; coverage metadata makes truncation explicit. Domains with no MX but a valid A/AAAA record use the RFC 5321 implicit MX. For a securely resolved implicit MX alias, TLSA is checked at the canonical name first and then the original name if necessary. |
 
 ### DNSSEC
 Every DoH query uses the `do=1` flag and propagates the **AD bit** (Authenticated Data) from the response. Each relevant UI panel distinguishes **DNSSEC authenticated** from **DNSSEC not authenticated**. The latter is informational for ordinary DNS records; an unauthenticated TLSA record is explicitly marked untrusted because DANE depends on DNSSEC.
@@ -30,15 +31,17 @@ Every DoH query uses the `do=1` flag and propagates the **AD bit** (Authenticate
 The UI warns about common configuration mistakes:
 - Multiple SPF / DMARC / MTA-STS / TLS-RPT records (RFC violation)
 - Inherited DMARC policy, its policy domain, test mode, and requested versus effective policy
-- Invalid MTA-STS discovery records and policy files
+- Invalid MTA-STS discovery records, policy files, and MX-pattern mismatches
 - TLSA records without DNSSEC validation
 - A truncated DANE scan when more than 15 unique MX hosts are published
-- Null MX (informational)
-- NXDOMAIN — the entire domain does not exist
+- Null MX (informational) and conflicting MX records
+- NXDOMAIN for the domain or its alias target; inherited DMARC results remain visible
 
 For protocols that are only discovered, the UI says **Found**, not **OK**.
-Only configurations that the tool fully validates (currently MTA-STS and the
-DNSSEC trust state for TLSA) receive a **Valid** / **DNSSEC OK** indicator.
+MTA-STS reports **Syntax and MX valid**, **MX mismatch**, **MX not checked**,
+or **Disabled**. SMTP STARTTLS support, certificate validity, and certificate
+matching against TLSA are not tested; the tool does not claim end-to-end mail
+delivery validation. **DNSSEC authenticated** refers to the DNS response only.
 Resolver failures are shown as lookup errors and never as missing records.
 
 ## API
@@ -57,11 +60,15 @@ Returns JSON with all results. DNS queries run in parallel via DNS-over-HTTPS (`
 ```json
 {
   "domain": "example.com",
+  "domainExists": true,
+  "canonicalName": "example.com",
+  "aliases": [],
   "ns": [{ "data": "ns1.example.com", "ttl": 3600 }],
   "a": [{ "data": "93.184.216.34", "ttl": 300 }],
   "aaaa": [],
   "mx": [{ "preference": 10, "exchange": "mail.example.com", "ttl": 3600 }],
   "nullMx": false,
+  "nullMxConflict": false,
   "spf": ["v=spf1 include:_spf.google.com ~all"],
   "dkim": [
     { "selector": "selector1", "cname": [{ "data": "selector1-example-com._domainkey.example.onmicrosoft.com", "ttl": 3600 }], "txt": [] },
@@ -72,10 +79,17 @@ Returns JSON with all results. DNS queries run in parallel via DNS-over-HTTPS (`
   "dmarcDiscovery": { "found": true, "valid": true, "policyDomain": "example.com", "source": "author", "inherited": false, "requestedPolicy": "reject", "effectivePolicy": "reject", "testing": false, "dnssec": true },
   "mtaSts": ["v=STSv1; id=20240101000000Z"],
   "mtaStsValidation": { "found": true, "valid": true, "record": "v=STSv1; id=20240101000000Z", "id": "20240101000000Z" },
-  "mtaStsPolicy": { "found": true, "valid": true, "policy": { "version": "STSv1", "mode": "enforce", "max_age": "604800", "mx": ["*.example.com"] } },
+  "mtaStsPolicy": {
+    "found": true,
+    "valid": true,
+    "syntaxValid": true,
+    "tlsChecked": false,
+    "policy": { "version": "STSv1", "mode": "enforce", "max_age": "604800", "mx": ["*.example.com"] },
+    "mxValidation": { "checked": true, "valid": true, "hosts": [{ "mx": "mail.example.com", "matched": true }], "reason": null }
+  },
   "tlsRpt": ["v=TLSRPTv1; rua=mailto:tlsrpt@example.com"],
   "bimi": ["v=BIMI1; l=https://example.com/logo.svg"],
-  "dane": [{ "mx": "mail.example.com", "preference": 10, "implicit": false, "tlsa": [], "dnssec": true, "status": 0 }],
+  "dane": [{ "mx": "mail.example.com", "preference": 10, "implicit": false, "tlsaBaseDomain": "mail.example.com", "tlsa": [], "dnssec": true, "status": 0 }],
   "daneMeta": { "candidates": 1, "checked": 1, "truncated": false, "limit": 15, "implicitMx": false },
   "dnssec": { "ns": true, "a": true, "aaaa": true, "mx": true, "txt": true, "dmarc": true, "mtaStsTxt": true, "tlsRpt": true, "bimi": true },
   "status":  { "ns": 0, "a": 0, "aaaa": 0, "mx": 0, "txt": 0, "dmarc": 0, "mtaStsTxt": 0, "tlsRpt": 0, "bimi": 0 },
@@ -84,9 +98,28 @@ Returns JSON with all results. DNS queries run in parallel via DNS-over-HTTPS (`
 ```
 
 DoH `Status` codes: `0` = OK, `2` = SERVFAIL, `3` = NXDOMAIN.
-Non-zero resolver statuses and transport failures are also exposed in
+Resolver errors (other than NXDOMAIN) and transport failures are also exposed in
 `errors`. If all five base DNS queries fail, the API returns `502` instead of
 a misleading empty `200` response.
+
+`domainExists` is `true`, `false`, or `null` when existence could not be
+determined. `aliases` contains `{name, target, ttl}` entries from the NS query;
+`canonicalName` is its final name. A CNAME followed by NXDOMAIN proves the alias
+exists, not that the original domain is absent.
+
+DMARC policy precedence is Author Domain, Organizational Domain, then PSD.
+Invalid policy tags use the RFC 9989 reporting-only `p=none` fallback when a
+valid `rua` URI is available. Otherwise the discovered record is retained with
+`valid: false` and null requested/effective policies. Reasons are returned in
+`dmarcDiscovery.warnings` and displayed in the UI.
+
+`mtaStsPolicy.valid` requires valid syntax and matching receiving MX hosts,
+except that a valid `mode: none` policy is a successful opt-out. A policy can
+have `syntaxValid: true` and `valid: false` when MX patterns do not match or MX
+discovery failed. `mxValidation.valid` is null when matching was not performed.
+The wildcard `*.example.com` matches exactly one label, not the apex or a
+multi-level subdomain. All MX candidates are checked, independently of the
+DANE scan limit. `tlsChecked: false` explicitly excludes SMTP TLS checks.
 
 ### Input validation
 - Max 253 characters total, max 63 characters per label
@@ -105,12 +138,15 @@ Only `GET` is accepted; other methods return `405 Method Not Allowed` with an `A
 
 The root path (`/`) returns an HTML page with a search form. Results are displayed in panels with colored indicators:
 - **Found** — a matching record was discovered but not fully validated
-- **Valid / DNSSEC authenticated** — the configuration or DNS response was validated
+- **Valid** - MTA-STS TXT syntax was validated
+- **Syntax and MX valid** - the MTA-STS policy is syntactically valid and matches the receiving MX hosts
+- **DNSSEC authenticated** - the resolver authenticated the DNS response
 - **Missing / Invalid** — a record was not found or failed validation
 - **Warning / Lookup failed** — duplicate records, unauthenticated TLSA, resolver errors, null MX, etc.
 
 Starting a new lookup aborts the previous browser request and ignores any stale
 response that finishes later, so older results cannot replace the latest query.
+DNS names and keys wrap inside their panels at desktop and mobile widths.
 
 ## Security
 
@@ -163,6 +199,11 @@ Workers Free allows 50 subrequests per invocation. User-controlled fan-out is
 bounded to 5 DKIM selectors (10 DNS queries), 15 TLSA hosts, and 8 DMARC Tree
 Walk queries. Together with fixed DNS and optional MTA-STS policy requests, the
 worst case is 42 subrequests, leaving headroom below the platform limit.
+The canonical/original TLSA fallback is used only for the sole implicit MX, so
+it does not increase that worst case. Each DoH or policy fetch has a 5-second
+timeout covering response headers and body reading. All fetches share a
+15-second lookup deadline, including sequential DMARC discovery, and observe
+the incoming request's cancellation signal.
 
 ## Caching
 
@@ -179,6 +220,7 @@ ready-to-use `wrangler.toml` (no secrets). Install, test, and deploy with:
 
 ```bash
 npm ci
+npx playwright install chromium
 npm run ci
 npm run deploy
 ```
@@ -189,9 +231,16 @@ Or, without `npm install`:
 npx wrangler deploy worker.js
 ```
 
-`npm run ci` performs a syntax check, runs the dependency-free Node test suite,
-and verifies Wrangler packaging with `deploy --dry-run`. The same command runs
-in GitHub Actions on Node.js 24.
+`npm run ci` performs a syntax check, runs the dependency-free Node API tests
+and Playwright browser tests, and verifies Wrangler packaging with
+`deploy --dry-run`. `npm test` runs only the fast Node tests;
+`npm run test:browser` starts and stops its own local Worker and checks desktop,
+375px, and 320px viewports without external DNS dependencies. Set
+`PLAYWRIGHT_PORT` to override its default port, 8975.
+
+GitHub Actions installs Chromium and its OS dependencies, runs the same CI
+command on Node.js 24, and rejects high/critical dependency advisories with
+`npm audit --audit-level=high`. Dependabot tracks both npm and GitHub Actions.
 
 ## Forking / running your own instance
 

@@ -29,6 +29,7 @@ Clone the repository, install dev dependencies, and start the worker locally:
 git clone https://github.com/luberan/nslookup.git
 cd nslookup
 npm install
+npx playwright install chromium
 npm test
 npm run dev
 ```
@@ -134,11 +135,25 @@ of opening a public issue or PR.
 
 ## Testing
 
-Run the automated regression suite and packaging check first:
+Install Chromium once, then run the automated regression suites and packaging
+check:
 
 ```bash
+npx playwright install chromium
 npm run ci
 ```
+
+`npm test` runs the fast, dependency-free Node API and rendering tests.
+`npm run test:browser` runs Chromium against a real local Worker with mocked
+DNS API results, covering CSP, XSS, NXDOMAIN, and overflow at desktop, 375px,
+and 320px widths. It starts its own server on port 8975 and shuts it down when
+finished; set `PLAYWRIGHT_PORT` if that port is occupied. Linux environments
+may need `npx playwright install --with-deps chromium` for OS dependencies.
+
+Include `AD: true` and `AD: false` resolver fixtures for DNSSEC changes. Use
+Node mock timers for timeout tests and streaming bodies for size-limit tests.
+Keep protocol regressions in `test/worker.test.js` and browser regressions in
+`test/browser/ui.spec.js`. Browser traces and screenshots are ignored artifacts.
 
 Then perform at least the following manual checks against your local
 `wrangler dev` instance before opening a PR:
