@@ -10,6 +10,10 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Browser test artifacts
+test-results/
+playwright-report/
+
 # Env
 .env
 .env.*

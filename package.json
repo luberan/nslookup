@@ -17,17 +17,20 @@
   "main": "worker.js",
   "scripts": {
     "check": "node --check worker.js",
-    "test": "node --test",
-    "ci": "npm run check && npm test && wrangler deploy --dry-run",
+    "test": "node --test test/worker.test.js",
+    "test:browser": "playwright test",
+    "ci": "npm run check && npm test && npm run test:browser && wrangler deploy --dry-run",
     "dev": "wrangler dev worker.js",
     "start": "wrangler dev worker.js",
     "deploy": "wrangler deploy worker.js",
     "tail": "wrangler tail"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "wrangler": "^4.127.1"
   },
   "overrides": {
+    "sharp": "^0.35.4",
     "undici": "7.29.0"
   },
   "engines": {
