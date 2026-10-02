@@ -27,7 +27,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
-    "wrangler": "^4.136.2"
+    "wrangler": "^4.143.0"
   },
   "overrides": {
     "sharp": "^0.35.4",
