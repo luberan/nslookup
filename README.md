@@ -233,14 +233,18 @@ npx wrangler deploy worker.js
 
 `npm run ci` performs a syntax check, runs the dependency-free Node API tests
 and Playwright browser tests, and verifies Wrangler packaging with
-`deploy --dry-run`. `npm test` runs only the fast Node tests;
+`deploy --dry-run`, then runs `npm run audit` on all locked dependencies,
+including development tools. `npm test` runs only the fast Node tests;
 `npm run test:browser` starts and stops its own local Worker and checks desktop,
 375px, and 320px viewports without external DNS dependencies. Set
 `PLAYWRIGHT_PORT` to override its default port, 8975.
 
-GitHub Actions installs Chromium and its OS dependencies, runs the same CI
-command on Node.js 24, and rejects high/critical dependency advisories with
-`npm audit --audit-level=high`. Dependabot tracks both npm and GitHub Actions.
+GitHub Actions installs Chromium and its OS dependencies and runs the functional
+checks (`npm run test:ci`) on Node.js 24. An independent `Dependency audit` job
+rejects high/critical advisories with `npm run audit`, without preventing tests
+from running. The audit also runs daily on the default branch. Dependabot
+tracks both npm and GitHub Actions; see [Testing](CONTRIBUTING.md#testing) for
+lockfile and override maintenance.
 
 ## Forking / running your own instance
 

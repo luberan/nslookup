@@ -19,7 +19,9 @@
     "check": "node --check worker.js",
     "test": "node --test test/worker.test.js",
     "test:browser": "playwright test",
-    "ci": "npm run check && npm test && npm run test:browser && wrangler deploy --dry-run",
+    "test:ci": "npm run check && npm test && npm run test:browser && wrangler deploy --dry-run",
+    "audit": "npm audit --audit-level=high",
+    "ci": "npm run test:ci && npm run audit",
     "dev": "wrangler dev worker.js",
     "start": "wrangler dev worker.js",
     "deploy": "wrangler deploy worker.js",
@@ -27,11 +29,11 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
-    "wrangler": "^4.136.2"
+    "wrangler": "^4.143.0"
   },
   "overrides": {
     "sharp": "^0.35.4",
-    "undici": "7.29.0"
+    "undici": "^7.29.1"
   },
   "engines": {
     "node": "24.x"
