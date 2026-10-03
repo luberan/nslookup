@@ -135,8 +135,8 @@ of opening a public issue or PR.
 
 ## Testing
 
-Install Chromium once, then run the automated regression suites and packaging
-check:
+Install Chromium once, then run the automated regression suites, packaging
+check, and dependency audit:
 
 ```bash
 npx playwright install chromium
@@ -149,6 +149,33 @@ DNS API results, covering CSP, XSS, NXDOMAIN, and overflow at desktop, 375px,
 and 320px widths. It starts its own server on port 8975 and shuts it down when
 finished; set `PLAYWRIGHT_PORT` if that port is occupied. Linux environments
 may need `npx playwright install --with-deps chromium` for OS dependencies.
+
+`npm run test:ci` runs the syntax check, both test suites, and the Wrangler
+deployment dry run. `npm run audit` checks all locked dependencies, including
+development tools, and fails on high or critical advisories. `npm run ci`
+runs both commands so local validation includes the same audit as GitHub CI.
+
+GitHub CI runs functional checks (`test`) and `Dependency audit` as independent
+jobs: an audit failure must not prevent the regression tests from running.
+Both jobs run on pushes, pull requests, and manual workflow runs. The audit
+also runs daily at 06:23 UTC on the default branch to detect new advisories
+without waiting for a dependency PR. Require both checks in branch protection
+or repository rulesets if they should block merging.
+
+An audit failure is not necessarily a functional regression: the advisory
+database can change even when the lockfile does not. Inspect the failed step
+and use `npm ls <package> --all` to trace the affected dependency. Keep the
+high-severity gate and include development dependencies; Wrangler's local
+server and deployment tooling still need security updates.
+
+Review `package.json` overrides when updating dependencies. They are temporary
+workarounds for upstream pins, not permanent exemptions from updates. The
+Undici override stays within major version 7 and requires at least 7.29.1;
+remove it when Miniflare's own dependency resolves to a patched compatible
+version. Ranges allow compatible updates, but `npm ci` still installs exactly
+what is in `package-lock.json`. After changing an override, regenerate the
+lockfile with `npm install --package-lock-only --ignore-scripts`, run `npm ci`
+and `npm run ci`, and commit both dependency files together.
 
 Include `AD: true` and `AD: false` resolver fixtures for DNSSEC changes. Use
 Node mock timers for timeout tests and streaming bodies for size-limit tests.
