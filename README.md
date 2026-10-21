@@ -187,11 +187,10 @@ This is dashboard-managed infrastructure and is therefore not represented in
 Operators of another deployment should recreate an equivalent rule in their
 own Cloudflare zone.
 
-Cloudflare rate limiting rules are zone-scoped. This repository currently has
-`workers_dev = true`, which also exposes a public `*.workers.dev` URL. When the
-production API is served on a custom domain, disable that alternate route with
-`workers_dev = false` or restrict it with Cloudflare Access so it cannot bypass
-the custom domain's zone-level rate limit.
+Cloudflare rate limiting rules are zone-scoped. Both production and preview
+`*.workers.dev` URLs are explicitly disabled in `wrangler.toml` so they cannot
+provide an alternate endpoint that bypasses the custom domain's zone-level
+rate limit.
 
 ### Request resource bounds
 
@@ -230,6 +229,14 @@ Or, without `npm install`:
 ```bash
 npx wrangler deploy worker.js
 ```
+
+The committed `wrangler.toml` sets `workers_dev = false` and
+`preview_urls = false`, disabling both production and preview `*.workers.dev`
+URLs on deployment, including Cloudflare Workers Builds. Keep both flags
+explicit so later deployments do not override dashboard-only settings.
+Serve the Worker through your own custom domain or route, configured in the
+Cloudflare dashboard or through `routes` in `wrangler.toml`. Existing custom
+domains and routes managed in the dashboard are left unchanged.
 
 `npm run ci` performs a syntax check, runs the dependency-free Node API tests
 and Playwright browser tests, and verifies Wrangler packaging with

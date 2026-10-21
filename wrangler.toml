@@ -12,9 +12,10 @@ name = "nslookup"
 main = "worker.js"
 compatibility_date = "2025-01-01"
 
-# Serve the Worker on its workers.dev subdomain (handy for testing). Set to
-# false if you only want it reachable via your own route(s).
-workers_dev = true
+# Keep production and preview workers.dev URLs disabled on every deployment.
+# Custom domains and routes can be configured below or in the dashboard.
+workers_dev = false
+preview_urls = false
 
 # Optional — bind to your own custom route(s). Uncomment and edit, or manage
 # routes from the Cloudflare dashboard instead:
