@@ -1,0 +1,65 @@
+name: Dependabot auto-merge
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+jobs:
+  auto-merge:
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # This privileged workflow must never check out or run code from the PR.
+      - name: Fetch verified Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ github.token }}
+      - name: Check update eligibility
+        id: eligibility
+        env:
+          UPDATED_DEPENDENCIES: ${{ steps.metadata.outputs.updated-dependencies-json }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from "node:fs";
+
+          const updates = JSON.parse(process.env.UPDATED_DEPENDENCIES);
+          if (!Array.isArray(updates) || updates.length === 0) {
+            throw new Error("Expected at least one verified Dependabot dependency update.");
+          }
+
+          const allowedDependencies = new Set(["@playwright/test", "wrangler"]);
+          const allowedUpdateTypes = new Set([
+            "version-update:semver-minor",
+            "version-update:semver-patch",
+          ]);
+          const eligible = updates.every((update) =>
+            update.packageEcosystem === "npm_and_yarn" &&
+            update.directory === "/" &&
+            update.dependencyType === "direct:development" &&
+            allowedDependencies.has(update.dependencyName) &&
+            allowedUpdateTypes.has(update.updateType)
+          );
+
+          console.log(eligible
+            ? "Eligible npm development updates: enabling auto-merge after required checks pass."
+            : "Skipping auto-merge: every update must be a Wrangler or Playwright npm development patch/minor update.");
+          appendFileSync(process.env.GITHUB_OUTPUT, `eligible=${eligible}\n`);
+          NODE
+      - name: Enable squash auto-merge
+        if: steps.eligibility.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: gh pr merge --auto --squash --match-head-commit "$PR_HEAD_SHA" "$PR_URL"
