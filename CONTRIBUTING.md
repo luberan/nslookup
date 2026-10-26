@@ -143,7 +143,8 @@ npx playwright install chromium
 npm run ci
 ```
 
-`npm test` runs the fast, dependency-free Node API and rendering tests.
+`npm test` runs the fast, dependency-free Node API, rendering, and Dependabot
+auto-merge policy tests.
 `npm run test:browser` runs Chromium against a real local Worker with mocked
 DNS API results, covering CSP, XSS, NXDOMAIN, and overflow at desktop, 375px,
 and 320px widths. It starts its own server on port 8975 and shuts it down when
@@ -159,8 +160,10 @@ GitHub CI runs functional checks (`test`) and `Dependency audit` as independent
 jobs: an audit failure must not prevent the regression tests from running.
 Both jobs run on pushes, pull requests, and manual workflow runs. The audit
 also runs daily at 06:23 UTC on the default branch to detect new advisories
-without waiting for a dependency PR. Require both checks in branch protection
-or repository rulesets if they should block merging.
+without waiting for a dependency PR. Both checks are required by the default
+branch's repository ruleset, and pull request branches must be up to date before
+merging. These requirements and the repository's auto-merge setting are managed
+in GitHub settings, not in workflow files.
 
 An audit failure is not necessarily a functional regression: the advisory
 database can change even when the lockfile does not. Inspect the failed step
@@ -196,6 +199,29 @@ Then perform at least the following manual checks against your local
 5. The `/api/dns` endpoint returns valid JSON and the documented fields.
 6. The HTML UI renders without console errors and the security headers are
    present in the response (check DevTools → Network).
+
+## Dependency updates
+
+Dependabot checks npm and GitHub Actions weekly. Minor and patch version
+updates to the development dependencies `@playwright/test` and `wrangler` are
+grouped into one npm pull request. Major updates remain separate.
+
+The Dependabot auto-merge workflow enables squash auto-merge only when every
+reported update is a minor or patch update to one of these two direct npm
+development dependencies in the repository root. It requires exactly one
+verified Dependabot commit at the current PR head and only enables auto-merge
+for non-draft pull requests from branches in this repository targeting the
+default branch. On PR updates, it revokes any previous auto-merge decision
+before validating again, including when commits are added, the base branch
+changes, or the PR becomes a draft. Eligible security updates can also
+auto-merge. Major updates, other dependencies, GitHub Actions updates, and
+PRs with additional commits remain manual.
+
+The workflow uses `pull_request_target` for write permissions but never checks
+out or executes pull request code. Keep that separation when changing it.
+Auto-merge does not bypass the required `test` and `Dependency audit` checks or
+the up-to-date branch requirement. Cloudflare Workers Builds deploys changes
+after they reach `main`; no separate deployment workflow is needed here.
 
 ## License
 

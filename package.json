@@ -17,7 +17,7 @@
   "main": "worker.js",
   "scripts": {
     "check": "node --check worker.js",
-    "test": "node --test test/worker.test.js",
+    "test": "node --test test/worker.test.js test/dependabot.test.js",
     "test:browser": "playwright test",
     "test:ci": "npm run check && npm test && npm run test:browser && wrangler deploy --dry-run",
     "audit": "npm audit --audit-level=high",

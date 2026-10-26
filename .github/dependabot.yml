@@ -5,6 +5,15 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      development-tools:
+        dependency-type: "development"
+        patterns:
+          - "@playwright/test"
+          - "wrangler"
+        update-types:
+          - "minor"
+          - "patch"
     commit-message:
       prefix: "chore(deps)"
     labels:
@@ -19,4 +28,3 @@ updates:
     labels:
       - "dependencies"
       - "ci"
-

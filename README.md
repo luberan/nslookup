@@ -250,8 +250,12 @@ GitHub Actions installs Chromium and its OS dependencies and runs the functional
 checks (`npm run test:ci`) on Node.js 24. An independent `Dependency audit` job
 rejects high/critical advisories with `npm run audit`, without preventing tests
 from running. The audit also runs daily on the default branch. Dependabot
-tracks both npm and GitHub Actions; see [Testing](CONTRIBUTING.md#testing) for
-lockfile and override maintenance.
+checks npm and GitHub Actions weekly. Wrangler and Playwright npm patch/minor
+updates are grouped and automatically squash-merged after the required CI
+checks pass and the branch is up to date. Major and GitHub Actions updates
+remain manual. Cloudflare Workers Builds deploys changes that reach `main`.
+See [Dependency updates](CONTRIBUTING.md#dependency-updates) for the automation
+policy and [Testing](CONTRIBUTING.md#testing) for lockfile and override maintenance.
 
 ## Forking / running your own instance
 
