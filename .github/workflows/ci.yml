@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
   schedule:
     - cron: "23 6 * * *"
@@ -10,12 +12,18 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Check GitHub Actions workflows
+        uses: docker://rhysd/actionlint:1.7.12
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -26,6 +34,16 @@ jobs:
         run: npx --no-install playwright install --with-deps chromium
       - name: Run functional checks and packaging
         run: npm run test:ci
+      - name: Upload Playwright failure diagnostics
+        if: failure() && hashFiles('test-results/**/trace.zip', 'test-results/**/*.png') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-failure-${{ github.run_attempt }}
+          path: |
+            test-results/**/trace.zip
+            test-results/**/*.png
+          if-no-files-found: error
+          retention-days: 7
 
   dependency-audit:
     name: Dependency audit

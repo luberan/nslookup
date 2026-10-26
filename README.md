@@ -246,10 +246,14 @@ including development tools. `npm test` runs only the fast Node tests;
 375px, and 320px viewports without external DNS dependencies. Set
 `PLAYWRIGHT_PORT` to override its default port, 8975.
 
-GitHub Actions installs Chromium and its OS dependencies and runs the functional
-checks (`npm run test:ci`) on Node.js 24. An independent `Dependency audit` job
-rejects high/critical advisories with `npm run audit`, without preventing tests
-from running. The audit also runs daily on the default branch. Dependabot
+GitHub Actions runs on pull requests, pushes to `main`, and manual runs; newer
+PR commits cancel superseded PR runs without cancelling main or scheduled runs.
+The required `test` job lints workflow definitions with actionlint, installs
+Chromium and its OS dependencies, and runs `npm run test:ci` on Node.js 24.
+Generated Playwright failure traces and screenshots are retained as CI artifacts
+for seven days. An independent `Dependency audit` job rejects high/critical
+advisories with `npm run audit`, without preventing tests from running. The audit
+also runs daily on the default branch. Dependabot
 checks npm and GitHub Actions weekly. Wrangler and Playwright npm patch/minor
 updates are grouped and automatically squash-merged after the required CI
 checks pass and the branch is up to date. Major and GitHub Actions updates

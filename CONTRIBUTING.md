@@ -158,12 +158,28 @@ runs both commands so local validation includes the same audit as GitHub CI.
 
 GitHub CI runs functional checks (`test`) and `Dependency audit` as independent
 jobs: an audit failure must not prevent the regression tests from running.
-Both jobs run on pushes, pull requests, and manual workflow runs. The audit
-also runs daily at 06:23 UTC on the default branch to detect new advisories
-without waiting for a dependency PR. Both checks are required by the default
-branch's repository ruleset, and pull request branches must be up to date before
-merging. These requirements and the repository's auto-merge setting are managed
-in GitHub settings, not in workflow files.
+Both jobs run on pushes to `main`, pull requests, and manual workflow runs.
+Feature-branch pushes alone do not start CI, avoiding duplicate push and PR
+runs. A newer commit to a PR cancels its superseded CI run; pushes to `main`,
+manual runs, and scheduled runs use separate, run-specific concurrency groups.
+The audit also runs daily at 06:23 UTC on the default branch to detect new
+advisories without waiting for a dependency PR. Both checks are required by
+the default branch's repository ruleset, and pull request branches must be up
+to date before merging. These requirements and the repository's auto-merge
+setting are managed in GitHub settings, not in workflow files.
+
+The `test` job first checks all GitHub Actions workflows with the versioned
+official actionlint Docker image. Workflow syntax, expression, or shell
+lint errors therefore fail the existing required `test` check. If actionlint
+is installed locally, run `actionlint` before submitting workflow changes.
+
+When tests fail and Playwright has generated diagnostics, CI uploads its
+`trace.zip` files and PNG screenshots as `playwright-failure-<run_attempt>`,
+retained for seven days. Download the artifact from the workflow run and open
+a trace with `npx playwright show-trace <path-to-trace.zip>`. Successful and
+cancelled runs do not upload diagnostics, and upload failures do not hide the
+original test failure. Errors before browser diagnostics are generated remain
+available in the job logs.
 
 An audit failure is not necessarily a functional regression: the advisory
 database can change even when the lockfile does not. Inspect the failed step
@@ -183,7 +199,8 @@ and `npm run ci`, and commit both dependency files together.
 Include `AD: true` and `AD: false` resolver fixtures for DNSSEC changes. Use
 Node mock timers for timeout tests and streaming bodies for size-limit tests.
 Keep protocol regressions in `test/worker.test.js` and browser regressions in
-`test/browser/ui.spec.js`. Browser traces and screenshots are ignored artifacts.
+`test/browser/ui.spec.js`. Browser traces and screenshots remain gitignored;
+use the CI artifacts described above to inspect browser failures.
 
 Then perform at least the following manual checks against your local
 `wrangler dev` instance before opening a PR:
