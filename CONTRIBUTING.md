@@ -208,11 +208,14 @@ grouped into one npm pull request. Major updates remain separate.
 
 The Dependabot auto-merge workflow enables squash auto-merge only when every
 reported update is a minor or patch update to one of these two direct npm
-development dependencies in the repository root. It verifies Dependabot's
-commits and only handles non-draft pull requests from branches in this
-repository targeting the default branch. Eligible security updates can also
-auto-merge. Major updates, other dependencies, and GitHub Actions updates
-remain manual.
+development dependencies in the repository root. It requires exactly one
+verified Dependabot commit at the current PR head and only enables auto-merge
+for non-draft pull requests from branches in this repository targeting the
+default branch. On PR updates, it revokes any previous auto-merge decision
+before validating again, including when commits are added, the base branch
+changes, or the PR becomes a draft. Eligible security updates can also
+auto-merge. Major updates, other dependencies, GitHub Actions updates, and
+PRs with additional commits remain manual.
 
 The workflow uses `pull_request_target` for write permissions but never checks
 out or executes pull request code. Keep that separation when changing it.

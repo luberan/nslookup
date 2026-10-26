@@ -2,17 +2,19 @@ name: Dependabot auto-merge
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review]
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft, edited]
 
 permissions: {}
+
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   auto-merge:
     if: >-
       github.event.pull_request.user.login == 'dependabot[bot]' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.base.ref == github.event.repository.default_branch &&
-      !github.event.pull_request.draft
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -20,12 +22,54 @@ jobs:
       pull-requests: write
     steps:
       # This privileged workflow must never check out or run code from the PR.
+      - name: Revoke auto-merge and verify the current PR
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          node --input-type=module <<'PR_VALIDATION'
+          import { execFileSync } from "node:child_process";
+          import { appendFileSync } from "node:fs";
+
+          const pr = JSON.parse(execFileSync("gh", [
+            "pr", "view", process.env.PR_URL,
+            "--json", "autoMergeRequest,baseRefName,headRefOid,isDraft",
+          ], { encoding: "utf8" }));
+          if (pr.autoMergeRequest) {
+            console.log("Revoking the previous auto-merge decision before validating the current PR.");
+            execFileSync("gh", ["pr", "merge", "--disable-auto", process.env.PR_URL], { encoding: "utf8" });
+          }
+
+          const endpoint = `repos/${process.env.GITHUB_REPOSITORY}/pulls/${process.env.PR_NUMBER}/commits?per_page=2`;
+          const commits = JSON.parse(execFileSync("gh", ["api", endpoint], { encoding: "utf8" }));
+          if (!Array.isArray(commits)) {
+            throw new Error("Expected the current PR commit list from GitHub.");
+          }
+          const verified = !pr.isDraft &&
+            pr.baseRefName === process.env.DEFAULT_BRANCH &&
+            pr.headRefOid === process.env.PR_HEAD_SHA &&
+            commits.length === 1 &&
+            commits[0].sha === pr.headRefOid &&
+            commits[0].author?.login === "dependabot[bot]" &&
+            commits[0].commit?.verification?.verified === true;
+
+          console.log(verified
+            ? "The current PR contains exactly one verified Dependabot commit."
+            : "::notice::Skipping auto-merge: the current non-draft PR must target the default branch and contain exactly one verified Dependabot commit at the expected head.");
+          appendFileSync(process.env.GITHUB_OUTPUT, `verified=${verified}\n`);
+          PR_VALIDATION
       - name: Fetch verified Dependabot metadata
+        if: steps.commit.outputs.verified == 'true'
         id: metadata
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ github.token }}
       - name: Check update eligibility
+        if: steps.commit.outputs.verified == 'true'
         id: eligibility
         env:
           UPDATED_DEPENDENCIES: ${{ steps.metadata.outputs.updated-dependencies-json }}
