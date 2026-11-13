@@ -28,8 +28,8 @@
     "tail": "wrangler tail"
   },
   "devDependencies": {
-    "@playwright/test": "^1.64.1",
-    "wrangler": "^4.157.0"
+    "@playwright/test": "^1.65.0",
+    "wrangler": "^4.160.0"
   },
   "overrides": {
     "sharp": "^0.35.4",
