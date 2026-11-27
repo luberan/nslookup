@@ -22,6 +22,6 @@ export default defineConfig({
     command: `wrangler dev --ip 127.0.0.1 --port ${port} --inspector-port 0 --local`,
     url: baseURL,
     reuseExistingServer: false,
-    timeout: 30000,
+    timeout: 120000,
   },
 });

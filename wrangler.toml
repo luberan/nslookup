@@ -11,6 +11,7 @@
 name = "nslookup"
 main = "worker.js"
 compatibility_date = "2025-01-01"
+compatibility_flags = ["enable_request_signal"]
 
 # Keep production and preview workers.dev URLs disabled on every deployment.
 # Custom domains and routes can be configured below or in the dashboard.

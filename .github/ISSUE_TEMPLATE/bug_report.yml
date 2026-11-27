@@ -10,7 +10,7 @@ body:
         sections below so the issue can be reproduced quickly.
 
         **Do not report security vulnerabilities here** — see
-        [SECURITY.md](../blob/main/SECURITY.md).
+        [the security policy](https://github.com/luberan/nslookup/security/policy).
 
   - type: input
     id: deployment

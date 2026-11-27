@@ -11,18 +11,24 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // Preflight CORS
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders() });
+    if (!["/", "/favicon.ico", "/api/dns"].includes(url.pathname)) {
+      return json({ error: "Not found." }, 404);
+    }
+    if (url.pathname !== "/api/dns" && !["GET", "HEAD"].includes(request.method)) {
+      return new Response(null, { status: 405, headers: { ...securityHeaders(), allow: "GET, HEAD" } });
     }
 
     // Favicon — redirect to an external image (with cache); avoids 404 spam in the log
     if (url.pathname === "/favicon.ico") {
-      return Response.redirect("https://www.lukasberan.cz/img/logo.png", 301);
+      return new Response(null, { status: 301, headers: {
+        ...securityHeaders(), location: "https://www.lukasberan.cz/img/logo.png",
+      } });
     }
 
     if (url.pathname === "/api/dns") {
-      // Only GET is meaningful for this read-only endpoint (OPTIONS handled above).
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: { ...corsHeaders(), ...securityHeaders() } });
+      }
       if (request.method !== "GET") {
         return json({ error: "Method not allowed. Use GET." }, 405, { allow: "GET, OPTIONS" });
       }
@@ -123,39 +129,18 @@ export default {
         return { ...await dohQuery(`_25._tcp.${mx}`, "TLSA", lookupOptions), baseDomain: mx };
       });
 
-      const [dmarcDiscovery, mtaStsQ, tlsRptQ, bimiQ, ...rest] =
+      const [dmarcDiscovery, sts, tlsRptQ, bimiQ, dkimRes, tlsaResults] =
         await Promise.all([
           discoverDmarcPolicy(name, domainExists, lookupOptions),
-          dohQuery(`_mta-sts.${name}`, "TXT", lookupOptions),
+          discoverMtaSts(name, lookupOptions),
           dohQuery(`_smtp._tls.${name}`, "TXT", lookupOptions),
           dohQuery(`default._bimi.${name}`, "TXT", lookupOptions),
-          ...dkimJobs,
-          ...tlsaJobs,
+          Promise.all(dkimJobs),
+          Promise.all(tlsaJobs),
         ]);
-      // Two variable-length tails share one Promise.all — split by job count.
-      const dkimRes = rest.slice(0, dkimJobs.length);
-      const tlsaResults = rest.slice(dkimJobs.length);
 
       const dmarc = dmarcDiscovery.records;
-
-      const mtaStsRecords = (mtaStsQ.answers || []).map((rr) => normalizeTxt(rr.data));
-      const mtaSts = mtaStsRecords.filter((txt) => /^v=STSv1(?:\s*;|$)/.test(txt));
-      const mtaStsValidation = validateMtaStsTxt(mtaStsRecords);
-      const mtaStsPolicy = mtaStsQ.error
-        ? {
-            found: false,
-            valid: false,
-            skipped: true,
-            reason: `MTA-STS TXT lookup failed: ${mtaStsQ.error}`,
-          }
-        : mtaStsValidation.valid
-          ? await fetchMtaStsPolicy(name, lookupOptions)
-          : {
-              found: false,
-              valid: false,
-              skipped: true,
-              reason: `policy not fetched: ${mtaStsValidation.reason}`,
-            };
+      const { query: mtaStsQ, records: mtaSts, validation: mtaStsValidation, policy: mtaStsPolicy } = sts;
 
       if (mtaStsPolicy.valid) {
         const hosts = mxCandidates.map((candidate) => candidate.implicit
@@ -170,11 +155,11 @@ export default {
 
       const tlsRpt = (tlsRptQ.answers || [])
         .map((rr) => normalizeTxt(rr.data))
-        .filter((txt) => /^v=TLSRPTv1\b/i.test(txt));
+        .filter((txt) => /^v=TLSRPTv1[ \t]*;/.test(txt));
 
       const bimi = (bimiQ.answers || [])
         .map((rr) => normalizeTxt(rr.data))
-        .filter((txt) => /^v=BIMI1\b/i.test(txt));
+        .filter((txt) => /^v=BIMI1(?:[ \t]*;|$)/i.test(txt));
 
       const dkim = dkimSelectors.map((selector, i) => {
         const cnameQ = dkimRes[i * 2] || {};
@@ -184,7 +169,7 @@ export default {
           .map((rr) => ({ data: normalizeTxt(rr.data), ttl: rr.ttl }))
           // Keep only TXT that looks like a DKIM key, not the CNAME-chain
           // hostname a TXT query also returns for delegated (M365) selectors.
-          .filter((rr) => /(^|;|\s)(v=DKIM1|k=|p=)/i.test(rr.data));
+          .filter((rr) => /(?:^|;)[ \t]*p[ \t]*=/.test(rr.data));
         return {
           selector,
           cname,
@@ -273,7 +258,7 @@ export default {
     }
 
     // Root page – UI
-    return new Response(HTML, { headers: htmlHeaders() });
+    return new Response(request.method === "HEAD" ? null : HTML, { headers: htmlHeaders() });
   },
 };
 
@@ -294,10 +279,8 @@ function normalizeDomain(raw) {
 
 function isValidDomain(name) {
   if (!name || name.length > 253) return false;
-  // Trailing dot tolerated, then trimmed for label check
-  const n = name.endsWith(".") ? name.slice(0, -1) : name;
   const label = /^(?!-)[a-z0-9-]{1,63}(?<!-)$/i;
-  const labels = n.split(".");
+  const labels = name.split(".");
   if (labels.length < 2) return false;
   return labels.every((l) => label.test(l));
 }
@@ -311,7 +294,7 @@ function parseDkimSelectors(raw) {
   const list = [
     ...new Set(raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)),
   ];
-  if (!list.length) return DEFAULTS;
+  if (!list.length) return null;
   const label = /^(?!-)[a-z0-9-]{1,63}(?<!-)$/i;
   const valid = list.every(
     (s) => s.length <= 253 && s.split(".").every((l) => label.test(l))
@@ -341,17 +324,22 @@ function hasDmarcVersion(record) {
 
 function parseDmarcRecord(record) {
   const fields = record.split(";");
-  if (fields.at(-1)?.trim() === "") fields.pop();
-  if (!fields.length || fields.some((field) => !field.trim())) {
-    return { valid: false, reason: "invalid empty DMARC field" };
-  }
-
+  const warnings = [];
   const tags = Object.create(null);
   for (const field of fields) {
-    const match = /^([A-Za-z]+)\s*=\s*([\x20-\x3A\x3C-\x7E]+)$/.exec(field.trim());
-    if (!match) return { valid: false, reason: "invalid DMARC tag-value syntax" };
+    if (!field.trim()) continue;
+    const match = /^([A-Za-z]+)[ \t]*=[ \t]*(.*)$/s.exec(field.trim());
+    if (!match) {
+      warnings.push("ignored malformed DMARC field");
+      continue;
+    }
     const key = match[1].toLowerCase();
     const value = match[2].trim();
+    // Keep invalid policy values for the reporting-only fallback below.
+    if (!/^[\x20-\x3A\x3C-\x7E]+$/.test(value) && !["p", "sp", "np"].includes(key)) {
+      warnings.push(`ignored malformed ${key} tag`);
+      continue;
+    }
     if (Object.hasOwn(tags, key)) {
       return { valid: false, reason: `duplicate DMARC tag: ${key}` };
     }
@@ -361,7 +349,6 @@ function parseDmarcRecord(record) {
     return { valid: false, reason: "DMARC record must begin with v=DMARC1" };
   }
 
-  const warnings = [];
   let invalidPolicy = !Object.hasOwn(tags, "p");
   if (invalidPolicy) warnings.push("missing p tag");
   const choices = {
@@ -481,6 +468,8 @@ async function discoverDmarcPolicy(domain, domainExists, lookupOptions) {
   for (let index = 0; index < targets.length; index++) {
     const target = targets[index];
     const qname = `_dmarc.${target}`;
+    // This owner cannot exist in DNS. Its parent can still publish a policy.
+    if (qname.length > 253) continue;
     const result = await dohQuery(qname, "TXT", lookupOptions);
     const records = (result.answers || []).map((answer) => normalizeTxt(answer.data));
     const candidates = records.filter(hasDmarcVersion);
@@ -527,9 +516,23 @@ async function discoverDmarcPolicy(domain, domainExists, lookupOptions) {
   return finalizeDmarcDiscovery(domain, domainExists, queries, selected);
 }
 
+async function discoverMtaSts(name, lookupOptions) {
+  const query = await dohQuery(`_mta-sts.${name}`, "TXT", lookupOptions);
+  const records = query.answers.map((rr) => normalizeTxt(rr.data))
+    .filter((txt) => /^v=STSv1(?:[ \t]*;|$)/.test(txt));
+  const validation = validateMtaStsTxt(records);
+  const policy = validation.valid ? await fetchMtaStsPolicy(name, lookupOptions) : {
+    found: false,
+    valid: false,
+    skipped: true,
+    reason: query.error ? `MTA-STS TXT lookup failed: ${query.error}` : `policy not fetched: ${validation.reason}`,
+  };
+  return { query, records, validation, policy };
+}
+
 function validateMtaStsTxt(records) {
   const found = records.length > 0;
-  const candidates = records.filter((record) => /^v=STSv1\s*;/.test(record));
+  const candidates = records.filter((record) => /^v=STSv1[ \t]*;/.test(record));
   if (candidates.length !== 1) {
     return {
       found,
@@ -589,7 +592,7 @@ function htmlHeaders() {
     "content-type": "text/html; charset=utf-8",
     "cache-control": "public, max-age=3600",
     "content-security-policy":
-      "default-src 'self'; script-src 'sha256-v/33sU4/5OJMF5GbHWm9RTKxnn4pscBFZzeff568lRo='; style-src 'sha256-stuq25QT9BNkzZvDL5MdNiiVN1cpg6bfM+PYOYOz24c='; connect-src 'self'; img-src 'self' data: https://www.lukasberan.cz; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "default-src 'self'; script-src 'sha256-WFdQlncGj9pVlpjRv80NhTFX8gAXmzsU4lSLlDJ7nxs='; style-src 'sha256-juXUtFxD5stU5VJQpx+FKTyuvupGan0scZIEJ2gA5sE='; connect-src 'self'; img-src 'self' data: https://www.lukasberan.cz; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
     "x-frame-options": "DENY",
     ...securityHeaders(),
   };
@@ -620,6 +623,9 @@ function dnsStatusError(status) {
 // DNS-over-HTTPS JSON query against cloudflare-dns.com
 // `do=1` — request that the resolver returns the AD (Authenticated Data) bit for DNSSEC.
 async function dohQuery(qname, type, lookupOptions) {
+  if (qname.length > 253) {
+    return { status: null, ad: false, error: "DNS query name exceeds 253 characters", answers: [] };
+  }
   const endpoint =
     `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(qname)}` +
     `&type=${encodeURIComponent(type)}&do=1`;
@@ -632,15 +638,24 @@ async function dohQuery(qname, type, lookupOptions) {
       signal: timeout.signal,
     });
     if (!res.ok) {
+      await res.body?.cancel();
       return { status: null, ad: false, error: `DoH ${type} HTTP ${res.status}`, answers: [] };
     }
     const data = await res.json();
-    if (!Number.isInteger(data.Status) || (data.Answer && !Array.isArray(data.Answer))) {
+    if (!Number.isInteger(data?.Status) || (data.Answer != null && !Array.isArray(data.Answer))) {
       throw new Error(`Invalid DoH ${type} response`);
     }
-    const cnameRecords = new Map((data.Answer || [])
-      .filter((answer) => Number(answer.type) === DNS_TYPE_CODES.CNAME)
-      .map((answer) => [trimDot(answer.name || qname).toLowerCase(), {
+    if (data.TC === true) throw new Error(`Truncated DoH ${type} response`);
+    const error = dnsStatusError(data.Status);
+    if (error) return { status: data.Status, ad: false, error, answers: [] };
+    const records = data.Answer || [];
+    if (records.some((rr) => !rr || typeof rr.data !== "string" || !Number.isInteger(rr.TTL)
+      || rr.TTL < 0 || !Number.isInteger(rr.type) || typeof rr.name !== "string" || !rr.name)) {
+      throw new Error(`Invalid DoH ${type} answer`);
+    }
+    const cnameRecords = new Map(records
+      .filter((answer) => answer.type === DNS_TYPE_CODES.CNAME)
+      .map((answer) => [trimDot(answer.name).toLowerCase(), {
         target: trimDot(answer.data).toLowerCase(), ttl: answer.TTL,
       }]));
     const aliases = [];
@@ -653,20 +668,21 @@ async function dohQuery(qname, type, lookupOptions) {
       aliases.push({ name: canonicalName, ...alias });
       canonicalName = alias.target;
     }
-    const answers = (data.Answer || [])
+    const answerOwner = type === "CNAME" ? qname.toLowerCase() : canonicalName;
+    const answers = records
       // A JSON DoH response can include a CNAME chain before the requested
       // records. Keep only the requested RR type so the API shape stays true.
-      .filter((answer) => Number(answer.type) === DNS_TYPE_CODES[type])
+      .filter((answer) => answer.type === DNS_TYPE_CODES[type] && trimDot(answer.name).toLowerCase() === answerOwner)
       .map((a) => simplifyAnswer(type, a));
     return {
       status: data.Status,
-      ad: !!data.AD,
+      ad: data.AD === true,
       nxdomain: data.Status === 3,
-      exists: data.Status === 0 || aliases.length > 0 ? true : data.Status === 3 ? false : null,
+      exists: data.Status === 0 || aliases.length > 0,
       canonicalName,
       aliases,
       answers,
-      error: dnsStatusError(data.Status),
+      error: null,
     };
   } catch (err) {
     // Network / JSON errors must not reject the surrounding Promise.all and
@@ -732,6 +748,7 @@ async function fetchMtaStsPolicy(domain, lookupOptions) {
     });
 
     if (res.status >= 300 && res.status < 400) {
+      await res.body?.cancel();
       const location = res.headers.get("location") || "";
       return {
         found: false,
@@ -743,6 +760,7 @@ async function fetchMtaStsPolicy(domain, lookupOptions) {
     }
 
     if (res.status !== 200) {
+      await res.body?.cancel();
       return {
         found: res.status >= 200 && res.status < 300,
         valid: false,
@@ -754,6 +772,7 @@ async function fetchMtaStsPolicy(domain, lookupOptions) {
     const ct = (res.headers.get("content-type") || "").toLowerCase();
     const ctOk = ct.split(";", 1)[0].trim() === "text/plain";
     if (!ctOk) {
+      await res.body?.cancel();
       return {
         found: true,
         valid: false,
@@ -768,6 +787,7 @@ async function fetchMtaStsPolicy(domain, lookupOptions) {
     // (the previous code read the entire body before checking its size).
     const lenHeader = res.headers.get("content-length");
     if (lenHeader && Number(lenHeader) > MAX_BYTES) {
+      await res.body?.cancel();
       return { found: true, valid: false, reason: "policy too large (> 64KB)", url };
     }
     const raw = await readCapped(res, MAX_BYTES);
@@ -916,11 +936,14 @@ async function readCapped(res, maxBytes) {
 function simplifyAnswer(type, a) {
   if (type === "MX") {
     const m = /^([0-9]+)\s+(.+)$/.exec(a.data);
-    if (m) return { preference: Number(m[1]), exchange: trimDot(m[2]), ttl: a.TTL };
+    if (!m || Number(m[1]) > 65535 || /\s/.test(m[2])) throw new Error("Invalid DoH MX answer");
+    return { preference: Number(m[1]), exchange: trimDot(m[2]).toLowerCase(), ttl: a.TTL };
   }
   if (type === "TLSA") {
     const p = (a.data || "").trim().split(/\s+/);
-    const certData = p.slice(3).join("");
+    // Cloudflare also uses DNS presentation-format parentheses for long hashes.
+    const digest = p.slice(3).join("");
+    const certData = digest.startsWith("(") && digest.endsWith(")") ? digest.slice(1, -1) : digest;
     const valid = p.length >= 4
       && /^[0-3]$/.test(p[0])
       && /^[0-1]$/.test(p[1])
@@ -955,12 +978,13 @@ function trimDot(s) {
 // no quotes, return it unchanged (some resolvers return plain text).
 function normalizeTxt(txt) {
   if (!txt) return "";
-  if (!txt.includes('"')) return txt;
+  if (!txt.startsWith('"')) return txt;
   let out = "";
   const re = /"((?:[^"\\]|\\.)*)"/g;
   let m;
   while ((m = re.exec(txt)) !== null) {
-    out += m[1].replace(/\\(.)/g, "$1");
+    out += m[1].replace(/\\(\d{3}|.)/g, (_, value) =>
+      value.length === 3 ? String.fromCharCode(Number(value)) : value);
   }
   return out;
 }
@@ -997,7 +1021,8 @@ const HTML = `<!doctype html>
     h1{ margin:0 0 12px; font-size:28px; letter-spacing:.2px; }
     p{ margin:0 0 18px; color:#c8d1ff; }
     form{ display:flex; gap:12px; flex-wrap:wrap; }
-    input[type=text]{ flex:1 1 320px; min-width:0; max-width:100%; padding:12px 14px; border-radius:12px; border:1px solid rgba(255,255,255,0.15); background:#0e1630; color:var(--text); outline:none; font-size:16px; }
+    input[type=text]{ flex:1 1 320px; min-width:0; max-width:100%; padding:12px 14px; border-radius:12px; border:1px solid rgba(255,255,255,0.15); background:#0e1630; color:var(--text); font-size:16px; }
+    :focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
     button{ padding:12px 16px; border-radius:12px; border:0; background:linear-gradient(135deg,#5d8bff,#6ae3ff); color:#0c1224; font-weight:700; cursor:pointer; }
     details.adv{ flex:1 1 100%; min-width:0; margin-top:2px; }
     details.adv summary{ cursor:pointer; color:#9fb1ff; font-size:14px; user-select:none; }
@@ -1027,30 +1052,32 @@ const HTML = `<!doctype html>
   </style>
 </head>
 <body>
-  <div class="wrap">
+  <main class="wrap">
     <div class="card">
       <h1>DNS lookup</h1>
       <p class="muted">NS, A, AAAA, MX, SPF, DKIM, DMARC, MTA-STS, TLS-RPT, BIMI and DANE/TLSA.</p>
       <form id="f">
-        <input id="name" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="lukasberan.cz" required />
+        <input id="name" aria-label="Domain name" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="lukasberan.cz" required />
         <button type="submit">Look up</button>
         <details class="adv">
           <summary>Advanced — custom DKIM selectors</summary>
-          <input id="selectors" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="selector1, selector2 (default — Microsoft 365)" />
-          <span class="muted">Comma-separated. Overrides the default Microsoft 365 selectors (max 5).</span>
+          <input id="selectors" aria-label="DKIM selectors" aria-describedby="selector-help" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="selector1, selector2 (default — Microsoft 365)" />
+          <span id="selector-help" class="muted">Comma-separated. Overrides the default Microsoft 365 selectors (max 5).</span>
         </details>
       </form>
 
+      <div id="lookup-status" role="status"></div>
       <div id="out" class="grid"></div>
       <div class="footer">Powered by Cloudflare Workers | Uses DNS-over-HTTPS at <code>cloudflare-dns.com</code> | Created by <a href="https://www.lukasberan.cz/"><strong>Lukáš Beran</strong></a></div>
     </div>
-  </div>
+  </main>
 
   <script>
     const f = document.getElementById('f');
     const nameEl = document.getElementById('name');
     const selectorsEl = document.getElementById('selectors');
     const out = document.getElementById('out');
+    const lookupStatus = document.getElementById('lookup-status');
     let lookupController = null;
     let lookupSequence = 0;
 
@@ -1059,7 +1086,8 @@ const HTML = `<!doctype html>
       lookupController?.abort();
       lookupController = new AbortController();
       const sequence = ++lookupSequence;
-      out.innerHTML = '<p class="muted">Querying DNS…</p>';
+      out.innerHTML = '';
+      lookupStatus.textContent = 'Querying DNS…';
       const name = nameEl.value.trim();
       const selectors = (selectorsEl.value || '').trim();
       try {
@@ -1070,9 +1098,10 @@ const HTML = `<!doctype html>
         if (sequence !== lookupSequence) return;
         if (!res.ok) throw new Error(data.error || 'Unknown error');
         render(data);
+        lookupStatus.textContent = 'Results for ' + data.domain;
       } catch (err) {
         if (err.name === 'AbortError' || sequence !== lookupSequence) return;
-        out.innerHTML = '<p class="err">' + esc(err.message) + '</p>';
+        lookupStatus.textContent = 'Lookup failed: ' + err.message;
       } finally {
         if (sequence === lookupSequence) lookupController = null;
       }
@@ -1346,14 +1375,14 @@ const HTML = `<!doctype html>
         ? badgeWarn('Not applicable') : recordBadge(data.dmarc, st.dmarc, errors.dmarc);
 
       out.innerHTML =
-        domainNotice +
+        domainNotice + '<h2 class="section-title">DNS records</h2>' +
         panel('NS' + dnssecBadge(st.ns, errors.ns, ds.ns), ns, true) +
         panel('A' + dnssecBadge(st.a, errors.a, ds.a), a) +
         panel('AAAA' + dnssecBadge(st.aaaa, errors.aaaa, ds.aaaa), aaaa) +
         panel('MX' + dnssecBadge(st.mx, errors.mx, ds.mx), mx) +
         nullMxNotice +
         panel('SPF (TXT)' + recordBadge(data.spf, st.txt, errors.txt) + dnssecBadge(st.txt, errors.txt, ds.txt) + (data.spf && data.spf.length > 1 ? badgeWarn('Multiple SPF records — misconfiguration') : ''), spf) +
-        '<div class="section-title">Email security</div>' +
+        '<h2 class="section-title">Email security</h2>' +
         panel('DKIM — ' + (data.dkimCustom ? 'custom selectors' : 'Microsoft 365') + dkimBadge, dkimHtml, true) +
         panel('DMARC (_dmarc.' + esc(dmarcPolicyDomain) + ')' + dmarcBadge + dnssecBadge(st.dmarc, errors.dmarc, ds.dmarc) + (dmarcInfo.inherited ? badgeInfo('Inherited') : ''), dmarc, true) +
         panel('MTA-STS TXT (_mta-sts.' + esc(d) + ')' + stsTxtBadge + dnssecBadge(st.mtaStsTxt, errors.mtaStsTxt, ds.mtaStsTxt), mtaSts) +

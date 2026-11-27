@@ -74,11 +74,12 @@ test("long DNS results fit the viewport and remain safe under CSP", async ({ pag
     await route.fulfill({ json: lookupResult() });
   });
   await page.goto("/");
-  await page.locator("#name").fill(domain);
+  await page.getByRole("textbox", { name: "Domain name" }).fill(domain);
   await page.locator("summary").click();
-  await page.locator("#selectors").fill("direct");
+  await page.getByRole("textbox", { name: "DKIM selectors" }).fill("direct");
   await page.getByRole("button", { name: "Look up", exact: true }).click();
   const results = page.locator("#out");
+  await expect(page.getByRole("status")).toHaveText("Results for " + domain);
   await expect(results.getByRole("heading", { name: "MTA-STS Policy MX mismatch", exact: true })).toBeVisible();
   await expect(results).toContainText("SMTP TLS: not checked");
   await expect(results).toContainText("using p=none for reporting only");
@@ -148,4 +149,12 @@ test("real Worker serves security headers and rejects invalid API requests", asy
   const post = await request.post("/api/dns?name=example.com");
   expect(post.status()).toBe(405);
   expect(post.headers().allow).toBe("GET, OPTIONS");
+  const head = await request.head("/");
+  expect(head.status()).toBe(200);
+  expect(head.headers()["content-security-policy"]).toBe(html.headers()["content-security-policy"]);
+  expect((await head.body()).length).toBe(0);
+  expect((await request.get("/api/missing")).status()).toBe(404);
+  const invalidMethod = await request.post("/");
+  expect(invalidMethod.status()).toBe(405);
+  expect(invalidMethod.headers().allow).toBe("GET, HEAD");
 });
