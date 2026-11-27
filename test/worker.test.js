@@ -1170,17 +1170,24 @@ test("UI ignores a stale lookup that finishes after a newer request", async () =
   assert.doesNotMatch(elements["lookup-status"].textContent, /stale result/);
 });
 
-test("CSP authorizes only the exact inline UI blocks", async () => {
+test("CSP pins the UI blocks and scopes Cloudflare detection to a fresh nonce and its script path", async () => {
   const response = await worker.fetch(new Request("https://local.test/"));
   const html = await response.text();
   const csp = response.headers.get("content-security-policy");
   assert.ok(csp);
-  assert.doesNotMatch(csp, /unsafe-inline/);
+  assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval/);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const scriptSources = csp.match(/(?:^|; )script-src ([^;]+)/)[1].split(" ");
+  const nonce = scriptSources.find((source) => source.startsWith("'nonce-"));
+  assert.match(nonce, /^'nonce-[A-Za-z0-9+/]{24}'$/);
+  const scriptHash = createHash("sha256").update(extractInlineBlock(html, "script")).digest("base64");
+  assert.deepEqual(new Set(scriptSources), new Set([
+    nonce, `'sha256-${scriptHash}'`, "https://local.test/cdn-cgi/challenge-platform/",
+  ]));
+  const next = await worker.fetch(new Request("https://local.test/"));
+  assert.ok(!next.headers.get("content-security-policy").includes(nonce));
   assert.match(csp, /object-src 'none'/);
 
-  for (const tag of ["style", "script"]) {
-    const content = extractInlineBlock(html, tag);
-    const hash = createHash("sha256").update(content).digest("base64");
-    assert.ok(csp.includes(`'sha256-${hash}'`), `${tag} hash missing from CSP`);
-  }
+  const styleHash = createHash("sha256").update(extractInlineBlock(html, "style")).digest("base64");
+  assert.ok(csp.includes(`style-src 'sha256-${styleHash}';`));
 });

@@ -134,6 +134,24 @@ test("NXDOMAIN and dangling aliases retain inherited DMARC details", async ({ pa
   }
 });
 
+test("a detection bootstrap can load its same-origin script under the Worker CSP", async ({ page }) => {
+  const scriptPath = "/cdn-cgi/challenge-platform/test.js";
+  await page.route("**" + scriptPath, route => route.fulfill({
+    contentType: "application/javascript",
+    body: "document.title = 'Detection fixture complete';",
+  }));
+  await page.route("**/", async route => {
+    const response = await route.fetch();
+    const nonce = /'nonce-([^']+)'/.exec(response.headers()["content-security-policy"])[1];
+    const bootstrap = `<script nonce="${nonce}">const js = document.createElement("script");
+      js.src = "${scriptPath}"; document.head.appendChild(js);</script>`;
+    const body = (await response.text()).replace("</body>", bootstrap + "</body>");
+    await route.fulfill({ response, body });
+  });
+  await page.goto("/");
+  await expect(page).toHaveTitle("Detection fixture complete");
+});
+
 test("real Worker serves security headers and rejects invalid API requests", async ({ request }) => {
   const html = await request.get("/");
   expect(html.status()).toBe(200);
@@ -151,7 +169,13 @@ test("real Worker serves security headers and rejects invalid API requests", asy
   expect(post.headers().allow).toBe("GET, OPTIONS");
   const head = await request.head("/");
   expect(head.status()).toBe(200);
-  expect(head.headers()["content-security-policy"]).toBe(html.headers()["content-security-policy"]);
+  const nonce = /'nonce-[A-Za-z0-9+/]{24}'/;
+  const getPolicy = html.headers()["content-security-policy"];
+  const headPolicy = head.headers()["content-security-policy"];
+  expect(headPolicy).toMatch(nonce);
+  expect(headPolicy).not.toBe(getPolicy);
+  expect(headPolicy.replace(nonce, "")).toBe(getPolicy.replace(nonce, ""));
+  expect(head.headers()["cache-control"]).toBe("no-store");
   expect((await head.body()).length).toBe(0);
   expect((await request.get("/api/missing")).status()).toBe(404);
   const invalidMethod = await request.post("/");

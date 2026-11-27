@@ -258,7 +258,7 @@ export default {
     }
 
     // Root page – UI
-    return new Response(request.method === "HEAD" ? null : HTML, { headers: htmlHeaders() });
+    return new Response(request.method === "HEAD" ? null : HTML, { headers: htmlHeaders(url.origin) });
   },
 };
 
@@ -587,12 +587,14 @@ function securityHeaders() {
   };
 }
 
-function htmlHeaders() {
+function htmlHeaders(origin) {
+  // Cloudflare reads the response header and nonces its injected detection script.
+  const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(18))));
   return {
     "content-type": "text/html; charset=utf-8",
-    "cache-control": "public, max-age=3600",
+    "cache-control": "no-store",
     "content-security-policy":
-      "default-src 'self'; script-src 'sha256-WFdQlncGj9pVlpjRv80NhTFX8gAXmzsU4lSLlDJ7nxs='; style-src 'sha256-juXUtFxD5stU5VJQpx+FKTyuvupGan0scZIEJ2gA5sE='; connect-src 'self'; img-src 'self' data: https://www.lukasberan.cz; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      `default-src 'self'; script-src 'nonce-${nonce}' 'sha256-WFdQlncGj9pVlpjRv80NhTFX8gAXmzsU4lSLlDJ7nxs=' ${origin}/cdn-cgi/challenge-platform/; style-src 'sha256-juXUtFxD5stU5VJQpx+FKTyuvupGan0scZIEJ2gA5sE='; connect-src 'self'; img-src 'self' data: https://www.lukasberan.cz; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
     "x-frame-options": "DENY",
     ...securityHeaders(),
   };

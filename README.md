@@ -162,6 +162,9 @@ The worker sends a complete set of security headers:
 The UI remains a single Worker file. A regression test recalculates both CSP
 hashes from the returned HTML, so changing inline CSS or JavaScript without
 updating the corresponding policy fails CI instead of silently blocking the UI.
+Each HTML response also supplies a fresh script nonce for Cloudflare's injected
+JavaScript Detections bootstrap. The only external script path allowed is
+`/cdn-cgi/challenge-platform/` on the page's origin.
 
 **MTA-STS policy fetch** is hardened against SSRF / abuse:
 - Performed only after one syntactically valid `_mta-sts` discovery TXT record
@@ -208,7 +211,7 @@ the incoming request's cancellation signal.
 
 ## Caching
 
-- **HTML** template — `Cache-Control: public, max-age=3600`
+- **HTML** template — `Cache-Control: no-store` to prevent reuse of the CSP nonce
 - **JSON API** — `Cache-Control: public, max-age=60` (successful responses)
 - **DoH queries** — `cf: { cacheTtl: 60, cacheEverything: true }` (Cloudflare edge cache)
 - **MTA-STS policy** — never HTTP-cached (`cache: "no-store"`)
