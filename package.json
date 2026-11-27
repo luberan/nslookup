@@ -20,7 +20,7 @@
     "test": "node --test test/worker.test.js test/dependabot.test.js",
     "test:browser": "playwright test",
     "test:ci": "npm run check && npm test && npm run test:browser && wrangler deploy --dry-run",
-    "audit": "npm audit --audit-level=high",
+    "audit": "npm audit --package-lock-only --include=dev --audit-level=high",
     "ci": "npm run test:ci && npm run audit",
     "dev": "wrangler dev worker.js",
     "start": "wrangler dev worker.js",

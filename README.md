@@ -136,7 +136,9 @@ Only `GET` is accepted; other methods return `405 Method Not Allowed` with an `A
 
 ## UI
 
-The root path (`/`) returns an HTML page with a search form. Results are displayed in panels with colored indicators:
+The root path (`/`) supports GET and HEAD. Unknown paths return 404.
+The HTML form announces lookup progress and the domain of the completed result.
+Results are displayed in panels with colored indicators:
 - **Found** — a matching record was discovered but not fully validated
 - **Valid** - MTA-STS TXT syntax was validated
 - **Syntax and MX valid** - the MTA-STS policy is syntactically valid and matches the receiving MX hosts
@@ -252,7 +254,8 @@ The required `test` job lints workflow definitions with actionlint, installs
 Chromium and its OS dependencies, and runs `npm run test:ci` on Node.js 24.
 Generated Playwright failure traces and screenshots are retained as CI artifacts
 for seven days. An independent `Dependency audit` job rejects high/critical
-advisories with `npm run audit`, without preventing tests from running. The audit
+advisories from the lockfile with `npm run audit`, including development dependencies,
+without installing packages. The audit
 also runs daily on the default branch. Dependabot
 checks npm and GitHub Actions weekly. Wrangler and Playwright npm patch/minor
 updates are grouped and automatically squash-merged after the required CI

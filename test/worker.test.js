@@ -33,7 +33,7 @@ function createFetch({ answers = {}, statuses = {}, authenticated = {}, policy =
       return new Response(JSON.stringify({
         Status: statuses[key] ?? 0,
         AD: authenticated[key] ?? false,
-        Answer: answers[key] || [],
+        Answer: (answers[key] || []).map((rr) => ({ name: url.searchParams.get("name"), ...rr })),
       }), {
         status: 200,
         headers: { "content-type": "application/dns-json" },
@@ -92,6 +92,7 @@ test("domain input rejects URL syntax and keeps IDN conversion", async () => {
       "-bad.example",
       "bad-.example",
       "example..com",
+      "example.com..",
       `${"a".repeat(64)}.example.com`,
       `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(63)}`,
     ]) {
@@ -113,6 +114,7 @@ test("API validates methods, selectors, and error response headers", async () =>
     for (const { path, method, status } of [
       { path: "/api/dns", method: "GET", status: 400 },
       { path: "/api/dns?name=example.com&selectors=bad_selector", method: "GET", status: 400 },
+      { path: "/api/dns?name=example.com&selectors=,,,", method: "GET", status: 400 },
       { path: "/api/dns?name=example.com", method: "POST", status: 405 },
       { path: "/api/dns", method: "OPTIONS", status: 204 },
     ]) {
@@ -145,7 +147,7 @@ test("DNSSEC and positive email records propagate from resolver to every API sec
     "delegated._domainkey.example.com|CNAME": [{ type: 5, TTL: 60, data: "key.example.net." }],
     "delegated._domainkey.example.com|TXT": [
       { name: "delegated._domainkey.example.com", type: 5, TTL: 60, data: "key.example.net." },
-      { type: 16, TTL: 60, data: "\"v=DKIM1; p=delegatedKey\"" },
+      { name: "key.example.net", type: 16, TTL: 60, data: "\"v=DKIM1; p=delegatedKey\"" },
     ],
     "direct._domainkey.example.com|TXT": [{ type: 16, TTL: 60, data: "\"v=DKIM1; p=directKey\"" }],
     "_dmarc.example.com|TXT": [{ type: 16, TTL: 60, data: "\"v=DMARC1; p=reject\"" }],
@@ -212,6 +214,28 @@ test("Malformed DoH responses retain JSON error handling", async () => {
   }
 });
 
+test("incomplete or malformed resolver data fails only the affected lookup", async () => {
+  for (const bad of [
+    { TC: true }, { Answer: false }, { Answer: [{ name: "example.com", type: 16, TTL: 60, data: {} }] },
+    { Answer: [{ name: "example.com", type: 16, TTL: "unknown", data: "v=spf1 -all" }] },
+    { Answer: [{ type: 16, TTL: 60, data: "v=spf1 -all" }] },
+    { Status: 2, Answer: [{ type: 16, TTL: 60, data: "v=spf1 -all" }] },
+  ]) {
+    const normal = createFetch();
+    await withFetch((url, init) => {
+      const params = new URL(url).searchParams;
+      return params.get("name") === "example.com" && params.get("type") === "TXT"
+        ? Response.json({ Status: 0, AD: true, ...bad }) : normal(url, init);
+    }, async () => {
+      const { response, body } = await lookup();
+      assert.equal(response.status, 200);
+      assert.ok(body.errors.txt);
+      assert.equal(body.dnssec.txt, false);
+      assert.deepEqual(body.spf, []);
+    });
+  }
+});
+
 test("DoH timeout bounds both response headers and streaming bodies", async (context) => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
   for (const phase of ["headers", "body"]) {
@@ -265,9 +289,13 @@ test("DoH sequential discovery respects the total 15-second lookup deadline", as
   context.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   const started = Array.from({ length: 4 }, () => Promise.withResolvers());
   let queries = 0;
-  await withFetch((input, { signal }) => {
+  const normal = createFetch({ answers: {
+    "_mta-sts.a.b.c.d.e.f.example.com|TXT": [{ type: 16, TTL: 60, data: "v=STSv1; id=one" }],
+  }, policy: { body: "version: STSv1\nmode: none\nmax_age: 0\n" } });
+  await withFetch((input, init) => {
+    const { signal } = init;
     const name = new URL(String(input)).searchParams.get("name");
-    if (!name.startsWith("_dmarc.")) return Promise.resolve(Response.json({ Status: 0 }));
+    if (!name?.startsWith("_dmarc.")) return normal(input, init);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => resolve(Response.json({ Status: 0 })), 4000);
       signal.addEventListener("abort", () => {
@@ -287,6 +315,7 @@ test("DoH sequential discovery respects the total 15-second lookup deadline", as
     const { response, body } = await pending;
     assert.equal(response.status, 200);
     assert.equal(body.errors.dmarc, "DoH TXT timeout");
+    assert.equal(body.mtaStsPolicy.valid, true);
     assert.equal(body.dmarcDiscovery.queries.length, 4);
     assert.equal(queries, 4);
   });
@@ -297,11 +326,11 @@ test("DoH CNAME chain records are not mislabeled as A or MX", async () => {
     answers: {
       "example.com|A": [
         { type: 5, TTL: 300, data: "target.example.com." },
-        { type: 1, TTL: 300, data: "192.0.2.10" },
+        { name: "target.example.com.", type: 1, TTL: 300, data: "192.0.2.10" },
       ],
       "example.com|MX": [
         { type: 5, TTL: 300, data: "target.example.com." },
-        { type: 15, TTL: 300, data: "10 mail.example.com." },
+        { name: "target.example.com.", type: 15, TTL: 300, data: "10 mail.example.com." },
       ],
     },
   });
@@ -563,6 +592,63 @@ test("malformed TLSA fields are reported as invalid data", async () => {
   });
 });
 
+test("Cloudflare parenthesized TLSA fingerprints resolve once per case-insensitive MX host", async () => {
+  const digest = "A1".repeat(32);
+  const fetch = createFetch({ answers: {
+    "example.com|MX": [
+      { type: 15, TTL: 60, data: "10 Mail.example.com." },
+      { type: 15, TTL: 60, data: "20 mail.example.com." },
+      { name: "elsewhere.example.", type: 15, TTL: 60, data: "0 other.example." },
+    ],
+    "_25._tcp.mail.example.com|TLSA": [
+      { type: 52, TTL: 60, data: "3 1 1 ( " + digest.slice(0, 32) + "\n" + digest.slice(32) + " )" },
+      { type: 52, TTL: 60, data: "3 1 1 ( " + digest },
+    ],
+  } });
+  await withFetch(fetch, async () => {
+    const { body } = await lookup();
+    assert.equal(body.daneMeta.candidates, 1);
+    assert.equal(body.dane[0].preference, 10);
+    assert.equal(body.dane[0].tlsa[0].certData, digest);
+    assert.equal(body.dane[0].tlsa[1].error, "malformed TLSA");
+  });
+});
+
+test("mail discovery distinguishes unrelated TXT and preserves a usable DMARC policy", async () => {
+  const rr = (data) => ({ type: 16, TTL: 60, data });
+  await withFetch(createFetch({ answers: {
+    "example.com|TXT": [rr('"v=spf1\\032" "-all"')],
+    "_mta-sts.example.com|TXT": [rr("unrelated")],
+    "_smtp._tls.example.com|TXT": [rr("v=tlsrptv1; rua=x"), rr("v=TLSRPTv1-extra; rua=x")],
+    "default._bimi.example.com|TXT": [rr("v=BIMI1.2; l=x")],
+    "one._domainkey.example.com|TXT": [rr("label with p=unrelated"), rr("p = key")],
+    "_dmarc.example.com|TXT": [rr("v=DMARC1; obsolete field; p=reject")],
+  } }), async () => {
+    const { body } = await lookup("example.com", "one");
+    assert.deepEqual(body.spf, ["v=spf1 -all"]);
+    assert.equal(body.mtaStsValidation.found, false);
+    assert.deepEqual(body.tlsRpt, []);
+    assert.deepEqual(body.bimi, []);
+    assert.deepEqual(body.dkim[0].txt, [{ data: "p = key", ttl: 60 }]);
+    assert.equal(body.dmarcDiscovery.effectivePolicy, "reject");
+    assert.ok(body.dmarcDiscovery.warnings.length);
+  });
+});
+
+test("DMARC inheritance still works when the author policy owner exceeds DNS limits", async () => {
+  const name = ["a".repeat(63), "b".repeat(63), "c".repeat(63), "d".repeat(49), "example.com"].join(".");
+  const fetch = createFetch({ answers: {
+    "_dmarc.example.com|TXT": [{ type: 16, TTL: 60, data: "v=DMARC1; p=reject; psd=n" }],
+  } });
+  await withFetch(fetch, async () => {
+    const { body } = await lookup(name);
+    assert.equal(body.domain, name);
+    assert.equal(body.dmarcDiscovery.policyDomain, "example.com");
+    assert.ok(body.dkim[0].errors.txt);
+    assert.ok(fetch.calls.every(({ url }) => new URL(url).searchParams.get("name").length <= 253));
+  });
+});
+
 test("DANE sorts MX candidates before applying a transparent limit", async () => {
   const mxAnswers = Array.from({ length: 21 }, (_, index) => ({
     type: 15,
@@ -793,6 +879,7 @@ test("DMARC invalid policy tags use reporting-only fallback or disable processin
   for (const policy of [
     "p=invalid; sp=reject; np=reject",
     "p=reject; sp=invalid; np=reject",
+    "p=reject; sp=",
     "p=reject; sp=reject; np=invalid",
     "sp=reject",
   ]) {
@@ -1056,6 +1143,7 @@ test("UI ignores a stale lookup that finishes after a newer request", async () =
       },
     },
     name: { value: "first.example" },
+    "lookup-status": { textContent: "" },
     selectors: { value: "" },
     out: { innerHTML: "" },
   };
@@ -1074,12 +1162,12 @@ test("UI ignores a stale lookup that finishes after a newer request", async () =
 
   pending[1](new Response(JSON.stringify({ error: "new result" }), { status: 400 }));
   await secondLookup;
-  assert.match(elements.out.innerHTML, /new result/);
+  assert.match(elements["lookup-status"].textContent, /new result/);
 
   pending[0](new Response(JSON.stringify({ error: "stale result" }), { status: 400 }));
   await firstLookup;
-  assert.match(elements.out.innerHTML, /new result/);
-  assert.doesNotMatch(elements.out.innerHTML, /stale result/);
+  assert.match(elements["lookup-status"].textContent, /new result/);
+  assert.doesNotMatch(elements["lookup-status"].textContent, /stale result/);
 });
 
 test("CSP authorizes only the exact inline UI blocks", async () => {
